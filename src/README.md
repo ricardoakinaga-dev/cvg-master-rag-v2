@@ -3,11 +3,11 @@
 
 ## Visão Geral
 
-Implementação ativa da fundação **Fase 3** do plano RAG Enterprise (documentado em `/docs/rag-enterprise/`).
+Implementação ativa da fundação **RAG Enterprise Premium** do processo CVG, documentado em `/docs`.
 
 - **Arquitetura:** Modular Monolith (FastAPI + Qdrant + Filesystem)
 - **Escopo atual:** retrieval híbrido, resposta com grounding, avaliação, sessão enterprise e multitenancy local
-- **Validado:** backend `170 passed, 17 skipped` e smoke frontend da Fase 2 `5/5`
+- **Validado:** backend live com Qdrant local `253 passed`; smoke frontend `7/7`
 
 ---
 
@@ -81,26 +81,41 @@ pip install -r requirements.txt
 cp .env.example .env  # editar com suas chaves
 
 # Editar .env:
-# OPENAI_API_KEY=sk-...
+# OPENAI_API_KEY=sk-...  # opcional para modo live; sem chave real usa fallback offline
 # QDRANT_HOST=localhost
 # QDRANT_PORT=6333
+# CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3015,http://127.0.0.1:3015
+# SESSION_COOKIE_SECURE=false  # local HTTP only; use true in staging/production HTTPS
 ```
 
 ---
 
 ## Qdrant Setup
 
-```bash
-# Usando Docker (local)
-docker run -d \
-  --name qdrant \
-  -p 6333:6333 \
-  -p 6334:6334 \
-  qdrant/qdrant
+### Comando padrão para validação local
 
-# Ou usar Qdrant Cloud (melhor para produção)
-# Configurar QDRANT_HOST e QDRANT_PORT no .env
+Use a imagem fixada abaixo para reproduzir a validação live local do GAP-03/GAP-04. As portas de host `6337/6338` são intencionais: evitam conflito com uma instância local já existente em `6333/6334`.
+
+```bash
+docker run -d \
+  --rm \
+  --name cvg-qdrant-local \
+  -p 6337:6333 \
+  -p 6338:6334 \
+  qdrant/qdrant:v1.11.5
+
+curl -fsS http://127.0.0.1:6337/readyz
 ```
+
+Para usar a porta default em um ambiente de desenvolvimento dedicado, troque os mapeamentos para `-p 6333:6333 -p 6334:6334` e use `QDRANT_PORT=6333`.
+
+### Parar instância temporária
+
+```bash
+docker stop cvg-qdrant-local
+```
+
+Para Qdrant Cloud ou outro host, configure `QDRANT_HOST` e `QDRANT_PORT` no ambiente antes de subir a API ou rodar reindex/testes.
 
 ---
 
@@ -140,19 +155,18 @@ python3 scripts/reindex_corpus.py default --local-only
 
 ```bash
 cd src
-source .env
-python3 scripts/reindex_corpus.py default
+QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 python3 scripts/reindex_corpus.py default
 ```
 
 ### Reindex sem recriar a collection
 
 ```bash
 cd src
-source .env
-python3 scripts/reindex_corpus.py default --skip-recreate
+QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 python3 scripts/reindex_corpus.py default --skip-recreate
 ```
 
 Use reindex quando precisar restaurar `Qdrant = disco` ou reconstruir o corpus a partir dos `*_raw.json`.
+Sem `OPENAI_API_KEY`, o pipeline usa embeddings offline determinísticas para validação local sem rede/custo externo.
 
 Os scripts de apoio seguem a mesma convenção:
 
@@ -163,9 +177,28 @@ Os scripts de apoio seguem a mesma convenção:
 
 `scripts/ingest_script.py` e `scripts/pipeline_script.py` preferem o corpus canônico já persistido; o `.md` de bootstrap só é usado se o `raw.json` ainda não existir.
 
-Runbook operacional completo:
+Runbook de migrations e reindex:
 
-- `docs/rag-enterprise/0024-operacao-de-corpus-e-reindex.md`
+- `docs/03_build/0310_MIGRATIONS.md`
+
+## Validação
+
+```bash
+cd src
+
+# suíte offline/local
+pytest -q tests
+
+# secret scanning dedicado
+python3 scripts/scan_secrets.py
+
+# suíte live com Qdrant
+docker run -d --rm --name cvg-qdrant-local -p 6337:6333 -p 6338:6334 qdrant/qdrant:v1.11.5
+curl -fsS http://127.0.0.1:6337/readyz
+QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 python3 scripts/reindex_corpus.py default
+QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 pytest -q -rs tests
+docker stop cvg-qdrant-local
+```
 
 ---
 
@@ -297,6 +330,10 @@ curl -X POST "http://localhost:8000/evaluation/dataset?workspace_id=default" \
 | `QDRANT_HOST` | localhost | Host do Qdrant |
 | `QDRANT_PORT` | 6333 | Porta do Qdrant |
 | `QDRANT_COLLECTION` | rag_phase0 | Nome da collection |
+| `CORS_ALLOWED_ORIGINS` | localhost/127.0.0.1 dev ports | Origens permitidas para browser clients |
+| `CORS_ALLOW_CREDENTIALS` | true | Permite credenciais CORS; wildcard `*` e removido quando true |
+| `SESSION_COOKIE_SECURE` | true | Cookie `Secure`; usar `false` apenas em HTTP local |
+| `SESSION_COOKIE_SAMESITE` | lax | Politica SameSite do cookie: `lax`, `strict` ou `none` |
 | `CHUNK_SIZE` | 1200 | Tamanho do chunk |
 | `CHUNK_OVERLAP` | 240 | Overlap entre chunks |
 | `DEFAULT_TOP_K` | 5 | Número de resultados |

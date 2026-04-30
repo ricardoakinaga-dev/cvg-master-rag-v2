@@ -36,6 +36,20 @@ STOPWORDS = {
 }
 
 
+def _has_usable_api_key() -> bool:
+    api_key = (getattr(client, "api_key", "") or "").strip()
+    if not api_key:
+        return False
+    placeholder_values = {
+        "test-key",
+        "sk-your-key-here",
+        "sk-...your-key...",
+        "your-api-key",
+        "changeme",
+    }
+    return api_key.lower() not in placeholder_values
+
+
 def _normalize_query_terms(query: str) -> list[str]:
     tokens = re.findall(r"\b[\wÀ-ÿ]{3,}\b", query.lower())
     return [token for token in tokens if token not in STOPWORDS]
@@ -195,7 +209,7 @@ def generate_answer(
     if not chunks:
         return "Não sei — nenhum contexto relevante encontrado.", [], 0.0
 
-    if not client.api_key:
+    if not _has_usable_api_key():
         start = time.time()
         answer, chunk_ids = _offline_answer_from_chunks(query, chunks)
         latency = time.time() - start

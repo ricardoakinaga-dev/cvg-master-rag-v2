@@ -18,7 +18,7 @@ def enterprise_session_from_authorization(
     authorization: str | None = Header(default=None, alias="Authorization"),
     session_cookie: str | None = Cookie(default=None, alias=SESSION_COOKIE_NAME),
 ) -> EnterpriseSession:
-    return EnterpriseSession(**get_enterprise_session(extract_session_token(authorization) or session_cookie))
+    return EnterpriseSession(**get_enterprise_session(session_cookie or extract_session_token(authorization)))
 
 
 def coerce_session(session: object) -> EnterpriseSession:
@@ -97,7 +97,7 @@ def require_permission(
 
 
 def require_admin(session: EnterpriseSession = Depends(enterprise_session_from_authorization)) -> EnterpriseSession:
-    return require_permission(session, "users.manage", target_type="permission", target_id="users.manage")
+    return require_permission(session, "runtime.manage", target_type="permission", target_id="runtime.manage")
 
 
 def require_operator(session: EnterpriseSession = Depends(enterprise_session_from_authorization)) -> EnterpriseSession:

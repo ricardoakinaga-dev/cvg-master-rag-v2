@@ -22,7 +22,7 @@ def _classify_catalog_scope(document_id: str, raw_data: dict, canonical_ids: set
     explicit_scope = metadata.get("catalog_scope")
     if explicit_scope in {"canonical", "operational"}:
         return explicit_scope
-    return "operational" if canonical_ids else "canonical"
+    return "operational"
 
 
 def _load_workspace_items(workspace_id: str = "default") -> list[dict]:

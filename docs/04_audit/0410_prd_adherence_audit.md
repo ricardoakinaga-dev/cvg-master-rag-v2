@@ -1,77 +1,29 @@
-# 0410 — PRD ADHERENCE AUDIT
+# 0410 - PRD ADHERENCE AUDIT
 
-## Auditoria de Aderência ao PRD — RAG Enterprise Premium
+## Resultado
 
----
+Classificacao geral: aderente.
 
-## Status Geral
+## Aderencia Por Area
 
-| Área | Status | Notas |
+| PRD / Produto | Evidencia | Status |
 |---|---|---|
-| Autenticação | ⚠️ Parcial | Build iniciado, não completado |
-| Upload/Documentos | ⚠️ Parcial | Build iniciado, não completado |
-| Busca/Search | ⚠️ Parcial | Build iniciado, não completado |
-| Query RAG | ⚠️ Parcial | Build iniciado, não completado |
-| RBAC | ⚠️ Parcial | Build iniciado, não completado |
-| Multi-tenant | ⚠️ Parcial | Build iniciado, não completado |
-| Métricas | ⚠️ Parcial | Build iniciado, não completado |
-| Health Check | ⚠️ Parcial | Build iniciado, não completado |
-| Auditoria | ⚠️ Parcial | Build iniciado, não completado |
+| Upload e processamento documental | Testes backend e smoke `documentos executa upload web pela UI` | Aderente |
+| Busca em base de conhecimento | Testes retrieval e smoke `busca executa retrieval pela UI` | Aderente |
+| Query/RAG com resposta via UI | Testes de query e smoke `chat executa query pela UI` | Aderente |
+| Multi-tenant | Non-leakage suite e smoke de troca de tenant | Aderente |
+| Admin de tenants/users | Testes de contratos admin e eventos | Aderente |
+| Runtime operacional | `src/api/admin_runtime_routes.py` e testes dedicados | Aderente |
+| Observabilidade | Health, traces, SLO, alerts, audits e repairs | Aderente |
+| Recuperacao/rotacao de senha | Testes de auth/recovery e revogacao de sessoes | Aderente |
+| Experiencia web responsiva | Playwright desktop e tablet | Aderente |
 
----
+## Evidencias Executadas
 
-## Fluxos PRD vs Esperado
+- `pytest -q -rs src/tests`: `245 passed, 15 skipped`
+- `QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 pytest -q -rs src/tests`: `260 passed`
+- `npm run test:smoke` em `frontend/`: `7 passed`
 
-### Fluxo 1: Autenticação
-| Step | Esperado (PRD) | Implementação | Status |
-|---|---|---|---|
-| Login com email/senha | RF-01 | ⏳ Em build | ⚠️ Parcial |
-| Sessão persistente | RF-01 | ⏳ Em build | ⚠️ Parcial |
-| Logout | RF-01 | ⏳ Em build | ⚠️ Parcial |
+## Findings
 
-### Fluxo 2: Upload/Documentos
-| Step | Esperado (PRD) | Implementação | Status |
-|---|---|---|---|
-| Upload de documento | RF-02 | ⏳ Em build | ⚠️ Parcial |
-| Parsing de documento | RF-02 | ⏳ Em build | ⚠️ Parcial |
-| Chunking | RF-02 | ⏳ Em build | ⚠️ Parcial |
-| Indexação | RF-02 | ⏳ Em build | ⚠️ Parcial |
-
-### Fluxo 3: Query RAG
-| Step | Esperado (PRD) | Implementação | Status |
-|---|---|---|---|
-| Retrieval híbrido | RF-04 | ⏳ Em build | ⚠️ Parcial |
-| Geração de resposta | RF-04 | ⏳ Em build | ⚠️ Parcial |
-| Citações | RF-04 | ⏳ Em build | ⚠️ Parcial |
-
----
-
-## Regras de Negócio Verificadas
-
-| RN | Descrição | Status |
-|---|---|---|
-| RN-01 | Isolamento de Tenant | ⚠️ Planejado, não implementado |
-| RN-02 | Consistência de Documento | ⚠️ Planejado, não implementado |
-| RN-03 | Expiração de Sessão | ⚠️ Planejado, não implementado |
-| RN-04 | Não-Deleção de Tenant com Dados | ⚠️ Planejado, não implementado |
-| RN-05 | RAG Groundedness | ⚠️ Planejado, não implementado |
-
----
-
-## Classificação
-
-- ✔ **Aderente:** Implementado conforme PRD
-- ⚠️ **Parcial:** Implementação em progresso ou com desvios menores
-- ❌ **Divergente:** Não implementado ou com desvios significativos
-
----
-
-## Divergências Identificadas
-
-*Nenhuma no momento — build não iniciado*
-
----
-
-## Impacto das Divergências
-
-*N/A — build em fase inicial*
+Nenhum gap de PRD bloqueante identificado na auditoria final.

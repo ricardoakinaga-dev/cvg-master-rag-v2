@@ -92,6 +92,8 @@ def get_observability_alerts(
         tel = resolve_telemetry()
         target_workspace = resolve_workspace_scope(workspace_id, _session, required_permission="observability.read")
         return tel.get_alerts(days=days, workspace_id=target_workspace)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "observability_alerts_error", "message": str(e)})
 
@@ -113,6 +115,8 @@ def get_observability_slo(
         except Exception:
             qdrant_ok = False
         return _build_slo_snapshot(metrics, workspace_id=target_workspace, qdrant_ok=qdrant_ok)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "observability_slo_error", "message": str(e)})
 
@@ -132,6 +136,8 @@ def get_observability_traces(
             "workspace_id": target_workspace,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "observability_traces_error", "message": str(e)})
 

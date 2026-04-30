@@ -1,0 +1,38 @@
+title = "CVG Master RAG Gitleaks"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated, dependency, local runtime and binary artifacts"
+paths = [
+  '''(^|/)src/data/''',
+  '''(^|/)src/logs/''',
+  '''(^|/)\.claude/''',
+  '''(^|/)\.codex/''',
+  '''(^|/)\.env$''',
+  '''(^|/)src/\.env$''',
+  '''(^|/)frontend/\.env$''',
+  '''(^|/)\.env\.(local|development|production)$''',
+  '''(^|/)src/\.env\.(local|development|production)$''',
+  '''(^|/)frontend/\.env\.(local|development|production)$''',
+  '''(^|/)frontend/\.next/''',
+  '''(^|/)frontend/node_modules/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)venv/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)test-results/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.mypy_cache/''',
+  '''(^|/)\.next-playwright/''',
+]
+
+[[allowlists]]
+description = "Documented placeholder credentials used in tests and examples"
+regexTarget = "line"
+regexes = [
+  '''sk-your-key-here''',
+  '''sk-test-mock''',
+  '''demo1234''',
+  '''demo_salt_fluxpay2024''',
+]

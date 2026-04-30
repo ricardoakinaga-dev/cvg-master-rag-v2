@@ -97,7 +97,7 @@ def _content_query_terms(text: str) -> set[str]:
     """Higher-signal query terms used to reject generic overlap."""
     return {
         token for token in _tokenize_terms(text, min_len=2)
-        if token not in LOW_SIGNAL_DOMAIN_TOKENS
+        if token not in LOW_SIGNAL_DOMAIN_TOKENS and not token.isdigit()
     }
 
 
@@ -504,9 +504,18 @@ def search_hybrid(
     sparse_hits = len(sparse_results) > 0
     top_score = results[0].score if results else 0.0
     second_score = results[1].score if len(results) >= 2 else 0.0
-    quality_floor = request.threshold if request.threshold > 0 else 0.25
+    quality_floor = request.threshold if request.threshold > 0 else 0.0
+    strongest_sparse_signal = max((float(item.get("sparse_score", 0.0) or 0.0) for item in top_results), default=0.0)
+    has_supported_result = any(_has_minimal_query_support(request.query, result.text) for result in results)
+    query_has_numeric_token = any(token.isdigit() for token in _tokenize_terms(request.query, min_len=2))
 
     if len(results) == 0:
+        low_confidence = True
+    elif not has_supported_result and query_has_numeric_token:
+        low_confidence = True
+    elif not sparse_hits and top_score < 0.25:
+        low_confidence = True
+    elif top_score < 0.25 and strongest_sparse_signal < 0.5:
         low_confidence = True
     elif top_score < quality_floor:
         low_confidence = True
@@ -645,21 +654,27 @@ def _bm25_search(
             limit=limit,
             query_filter=_build_qdrant_filter(workspace_id, filters)
         ).points
-        return [
-            {
+        filtered = []
+        for r in results:
+            score = float(r.score or 0.0)
+            text = r.payload.get("text", "")
+            if score <= 0:
+                continue
+            if not _has_minimal_query_support(query, text):
+                continue
+            filtered.append({
                 "chunk_id": r.payload["chunk_id"],
                 "document_id": r.payload["document_id"],
-                "text": r.payload["text"],
-                "score": r.score,
+                "text": text,
+                "score": score,
                 "page_hint": r.payload.get("page_hint"),
                 "strategy": r.payload.get("strategy"),
                 "dense_score": 0.0,
-                "sparse_score": r.score,
+                "sparse_score": score,
                 "document_filename": r.payload.get("document_filename"),
                 "tags": r.payload.get("tags") or [],
-            }
-            for r in results
-        ]
+            })
+        return filtered
     except Exception:
         return []
 

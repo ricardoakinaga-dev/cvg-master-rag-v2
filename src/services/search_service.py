@@ -278,6 +278,10 @@ def _should_try_neural_query_retry(request: QueryRequest, search_resp: SearchRes
         return False
     if _query_is_acronym_heavy(request.query):
         return False
+    from services.vector_service import _has_minimal_query_support
+
+    if any(_has_minimal_query_support(request.query, item.text) for item in search_resp.results[:3]):
+        return False
     return bool(search_resp.low_confidence)
 
 
@@ -373,6 +377,9 @@ def _should_try_grounded_reanswer(
     if grounding_result.grounded:
         return False
     if not getattr(llm_client, "api_key", ""):
+        return False
+    _, adaptive_reason = _should_expand_adaptive(request.query)
+    if adaptive_reason == "specific_lookup":
         return False
     if grounding_result.citation_coverage >= LOW_CONFIDENCE_GROUNDING_OVERRIDE_THRESHOLD:
         return False
@@ -549,9 +556,9 @@ def search_and_answer(
         })
 
     retrieval_low_confidence = bool(search_resp.low_confidence)
-    retrieval_has_minimal_support = _query_has_minimal_support(request.query, chunks_data)
-    if not retrieval_has_minimal_support:
-        retrieval_low_confidence = True
+    retrieval_has_minimal_support = True
+    if retrieval_low_confidence:
+        retrieval_has_minimal_support = _query_has_minimal_support(request.query, chunks_data)
 
     # ── Step 3: Generate answer ───────────────────────────────
     if not search_resp.results:

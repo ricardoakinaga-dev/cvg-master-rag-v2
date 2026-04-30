@@ -7,6 +7,23 @@
 
 ---
 
+## Nota Canonica de Score - 2026-04-28
+
+Este arquivo registra o **gate historico de completude do BUILD**. A declaracao de `100%` abaixo significa que as fases e sprints planejadas foram marcadas como completas no contexto do build gate original.
+
+Ela **nao** representa o score operacional vigente do programa.
+
+Score operacional canonico atual:
+
+- **current_score:** `95/100`
+- **target_score:** `98-100/100`
+- **fonte canonica:** `docs/04_audit/2026-04-28-score-canonico.md`
+- **runtime oficial:** `docs/99_runtime_state.md`
+
+Condicoes para subir acima de 95/100: reconciliacao documental, Qdrant live local sem skips, hardening de `EMBEDDING_MODEL`/CORS/cookies/secrets e primeiro desacoplamento de `src/api/main.py`.
+
+---
+
 ## Pré-Build Checklist
 
 | Critério | Status |
@@ -107,22 +124,32 @@
 | F3.9: Smoke Tests | ✅ OK | CI com pytest |
 
 **Gate F3: ✅ APPROVED — ALL DEBT RESOLVED**
-**Maturidade Geral: 100%**
+
+### Atualizacao GAP-12 — Auditoria Final 98-100
+
+- Data: 2026-04-30
+- Relatorio: `docs/04_audit/0490_audit_report.md`
+- Score final: `100/100`
+- Evidencia principal: backend com Qdrant live `260 passed`; Playwright smoke `7 passed`; scanners de secrets passaram.
+**Completude historica do build gate: 100%**
+**Score operacional vigente: 95/100, conforme `docs/04_audit/2026-04-28-score-canonico.md`**
 
 ---
 
 ## Decisão
 
-### ✅ GO — RELEASE ENTERPRISE PREMIUM FINAL APROVADO
+### ✅ GO — BUILD GATE HISTORICO APROVADO
 
-Todos os débitos técnicos resolvidos. Sistema 100% completo.
+Todos os débitos técnicos do build gate original foram resolvidos. Para decisao operacional atual, usar o score canonico vigente em `docs/04_audit/2026-04-28-score-canonico.md`.
 
 | Métrica | Valor |
 |---|---|
 | Sprints Totais | 14 |
 | Completas | 14 |
 | Parciais | 0 |
-| Taxa de Completude | 100% |
+| Taxa de Completude do build gate | 100% |
+| Score operacional vigente | 95/100 |
+| Meta operacional | 98-100/100 |
 
 ---
 
@@ -142,4 +169,10 @@ Todos os débitos técnicos resolvidos. Sistema 100% completo.
 
 ## Próximos Passos
 
-**Nenhum** — Enterprise Premium MVP 100% completo.
+Executar o backlog residual de fechamento 98-100:
+
+1. Reconciliar score canonico.
+2. Rodar Qdrant live local sem skips.
+3. Corrigir hardening de configuracao, CORS, cookies e secrets.
+4. Executar primeiro desacoplamento de `src/api/main.py`.
+5. Rodar auditoria final.

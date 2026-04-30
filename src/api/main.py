@@ -25,9 +25,6 @@ from models.schemas import (
     EnterpriseSession, EnterpriseTenant, EnterpriseTenantCreate, EnterpriseTenantUpdate,
     EnterpriseUserCreate, EnterpriseUserRecord, EnterpriseUserUpdate,
     AdminEventListResponse,
-    AdminOperationalCleanupResponse,
-    AdminQdrantPruneResponse,
-    AdminRuntimeResponse,
     AuditLogListResponse,
     ObservabilityAlertsResponse,
     ObservabilitySLOResponse,
@@ -74,9 +71,10 @@ from core.config import (
     SUPPORTED_EXTENSIONS,
     DOCUMENTS_DIR,
     DATA_DIR,
-    QDRANT_COLLECTION,
     CORS_ALLOWED_ORIGINS,
     CORS_ALLOW_CREDENTIALS,
+    SESSION_COOKIE_SECURE,
+    SESSION_COOKIE_SAMESITE,
 )
 from services.telemetry_service import get_telemetry
 from services.request_context import clear_request_id, set_request_id
@@ -95,11 +93,10 @@ from services.api_security import (
     require_workspace_access,
     resolve_workspace_scope,
 )
-from qdrant_client.models import FieldCondition, Filter, MatchValue
-from services.integrity_service import summarize_workspace_index_drift
-from services.operational_retention_service import summarize_operational_retention
 from telemetry.slo import SLI_DEFINITIONS, get_all_slos, get_slo_status
 from telemetry.tracing import SpanKind, SpanStatus, list_recent_spans, record_exception, start_span, traced_span
+from api.admin_runtime_routes import router as admin_runtime_router
+from api.health_routes import router as health_router
 from api.observability_routes import router as observability_router, _build_slo_snapshot
 
 
@@ -121,17 +118,11 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.include_router(admin_runtime_router)
+app.include_router(health_router)
 app.include_router(observability_router)
 
-DEFAULT_CORS_ORIGINS = [
-    "http://127.0.0.1:3005",
-    "http://127.0.0.1:3015",
-    "http://localhost:3005",
-    "http://localhost:3015",
-    "https://www.master.rag.centroveterinarioguarapiranga.com",
-]
-raw_cors_origins = os.getenv("CORS_ALLOWED_ORIGINS", "")
-allowed_cors_origins = [origin.strip() for origin in raw_cors_origins.split(",") if origin.strip()] or DEFAULT_CORS_ORIGINS
+allowed_cors_origins = CORS_ALLOWED_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
@@ -144,11 +135,12 @@ app.add_middleware(
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "auditor": 2, "admin_rag": 3, "super_admin": 4, "admin": 4}
 SESSION_COOKIE_MAX_AGE = 60 * 60 * 8
-SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "true").lower() in {"1", "true", "yes", "on"}
 
 
 def _resolve_session_token(authorization: str | None, session_cookie: str | None) -> str | None:
-    return extract_session_token(authorization) or session_cookie
+    if isinstance(session_cookie, str) and session_cookie:
+        return session_cookie
+    return extract_session_token(authorization)
 
 
 def _set_session_cookie(response: Response, session_token: str | None) -> None:
@@ -160,7 +152,7 @@ def _set_session_cookie(response: Response, session_token: str | None) -> None:
         max_age=SESSION_COOKIE_MAX_AGE,
         httponly=True,
         secure=SESSION_COOKIE_SECURE,
-        samesite="lax",
+        samesite=SESSION_COOKIE_SAMESITE,
         path="/",
     )
 
@@ -170,7 +162,7 @@ def _clear_session_cookie(response: Response) -> None:
         key=SESSION_COOKIE_NAME,
         httponly=True,
         secure=SESSION_COOKIE_SECURE,
-        samesite="lax",
+        samesite=SESSION_COOKIE_SAMESITE,
         path="/",
     )
 
@@ -299,88 +291,6 @@ def _resolve_workspace_scope(
     )
 
 
-def _compute_readiness_summary(
-    metrics: dict,
-    alerts: dict,
-    corpus: dict,
-    qdrant_ok: bool,
-    index_drift: dict | None = None,
-) -> dict:
-    """Convert operational signals into a compact executive readiness score."""
-    score = 100
-    reasons: list[str] = []
-
-    alert_items = alerts.get("items", [])
-    critical_alerts = sum(1 for item in alert_items if item.get("status") == "firing" and item.get("severity") == "critical")
-    high_alerts = sum(1 for item in alert_items if item.get("status") == "firing" and item.get("severity") == "high")
-
-    answer = metrics.get("answer", {})
-    evaluation = metrics.get("evaluation", {})
-    retrieval = metrics.get("retrieval", {})
-
-    groundedness_rate = float(answer.get("groundedness_rate", 0.0) or 0.0)
-    no_context_rate = float(answer.get("no_context_rate", 0.0) or 0.0)
-    hit_rate_top5 = float(evaluation.get("hit_rate_top5", 0.0) or 0.0)
-    p95_latency_ms = float(retrieval.get("p95_latency_ms", 0.0) or 0.0)
-    partial_documents = int(corpus.get("partial_documents", 0) or 0)
-    noncanonical_points = int((index_drift or {}).get("noncanonical_points", 0) or 0)
-    noncanonical_documents = int((index_drift or {}).get("noncanonical_documents", 0) or 0)
-
-    if not qdrant_ok:
-        score -= 35
-        reasons.append("Qdrant indisponível")
-    if noncanonical_points:
-        score -= min(10 + noncanonical_documents * 3, 20)
-        reasons.append(f"drift vetorial: {noncanonical_points} pontos fora do corpus canônico")
-    if critical_alerts:
-        score -= min(critical_alerts * 15, 30)
-        reasons.append(f"{critical_alerts} alertas críticos")
-    if high_alerts:
-        score -= min(high_alerts * 8, 16)
-        reasons.append(f"{high_alerts} alertas altos")
-    if partial_documents:
-        score -= min(partial_documents * 5, 15)
-        reasons.append(f"{partial_documents} documentos parciais")
-    if groundedness_rate > 0 and groundedness_rate < 0.85:
-        score -= min(int(round((0.85 - groundedness_rate) * 100)), 20)
-        reasons.append(f"groundedness em {round(groundedness_rate * 100, 1)}%")
-    if no_context_rate > 0.10:
-        score -= min(int(round((no_context_rate - 0.10) * 100)), 20)
-        reasons.append(f"no-context em {round(no_context_rate * 100, 1)}%")
-    if hit_rate_top5 > 0 and hit_rate_top5 < 0.95:
-        score -= min(int(round((0.95 - hit_rate_top5) * 100)), 20)
-        reasons.append(f"hit@5 em {round(hit_rate_top5 * 100, 1)}%")
-    if p95_latency_ms > 5000:
-        score -= 15
-        reasons.append(f"p95 em {round(p95_latency_ms, 1)} ms")
-    elif p95_latency_ms > 2500:
-        score -= 8
-        reasons.append(f"p95 em {round(p95_latency_ms, 1)} ms")
-
-    score = max(0, min(100, score))
-    if score >= 90:
-        status = "ready"
-    elif score >= 75:
-        status = "stable"
-    elif score >= 55:
-        status = "at_risk"
-    else:
-        status = "critical"
-
-    if not reasons:
-        reasons.append("Sem bloqueios operacionais relevantes")
-
-    return {
-        "readiness_score": score,
-        "readiness_status": status,
-        "readiness_reasons": reasons[:3],
-        "groundedness_rate": groundedness_rate,
-        "no_context_rate": no_context_rate,
-        "evaluation_hit_rate_top5": hit_rate_top5,
-        "p95_latency_ms": p95_latency_ms,
-    }
-
-
 def _current_disk_usage_percent() -> float:
     from shutil import disk_usage
     from core.config import LOGS_DIR
@@ -444,67 +354,6 @@ def _build_slo_snapshot(metrics: dict, *, workspace_id: str | None, qdrant_ok: b
     }
 
 
-# ─── Health ───────────────────────────────────────────────────
-
-
-@app.get("/health")
-def health_check(
-    workspace_id: str | None = Query(default=None),
-    session: EnterpriseSession | object = Depends(_enterprise_session_from_authorization),
-):
-    """Health check endpoint."""
-    target_workspace = _resolve_workspace_scope(workspace_id, session)
-    with traced_span("health.check", kind=SpanKind.INTERNAL, workspace_id=target_workspace) as span:
-        corpus = get_workspace_inventory(target_workspace or "default")
-        telemetry = get_telemetry()
-        qdrant_ok = False
-        qdrant_points = None
-        qdrant_workspace_points = None
-        try:
-            client = get_client()
-            client.get_collections()
-            try:
-                qdrant_points = client.count(
-                    collection_name=QDRANT_COLLECTION,
-                    exact=True,
-                ).count
-                qdrant_workspace_points = client.count(
-                    collection_name=QDRANT_COLLECTION,
-                    count_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="workspace_id",
-                                match=MatchValue(value=target_workspace),
-                            )
-                        ]
-                    ),
-                    exact=True,
-                ).count
-            except Exception:
-                qdrant_points = None
-                qdrant_workspace_points = None
-            qdrant_ok = True
-        except Exception:
-            pass
-
-        span.set_attribute("qdrant.ok", qdrant_ok)
-        span.set_attribute("workspace_id", target_workspace or "default")
-        return {
-            "status": "healthy" if qdrant_ok else "degraded",
-            "version": "0.1.0",
-            "workspace_id": target_workspace,
-            "qdrant": {
-                "status": "ok" if qdrant_ok else "error",
-                "collection": QDRANT_COLLECTION,
-                "points": qdrant_points,
-                "workspace_points": qdrant_workspace_points,
-            },
-            "corpus": corpus,
-            "telemetry": telemetry.get_operational_snapshot(days=1, workspace_id=target_workspace),
-            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        }
-
-
 # ─── Enterprise Session ───────────────────────────────────────
 
 
@@ -526,24 +375,71 @@ def get_tenants():
     return list_tenants()
 
 
+def _coerce_login_request(request: LoginRequest | str | None, password: str | None = None, tenant_id: str | None = None, email: str | None = None) -> LoginRequest:
+    if isinstance(request, LoginRequest):
+        return request
+    resolved_email = request if isinstance(request, str) else email
+    if isinstance(resolved_email, str):
+        if not isinstance(password, str):
+            raise TypeError("login() missing required password argument")
+        return LoginRequest(
+            email=resolved_email,
+            password=password,
+            tenant_id=tenant_id or "default",
+        )
+    raise TypeError("Invalid login request format")
+
+
 @app.post("/auth/login", response_model=EnterpriseSession)
-def login(request: LoginRequest, response: Response, raw_request: Request):
+def _login_route(request: LoginRequest, response: Response, raw_request: Request):
     """Create a server-side enterprise session for the requested identity."""
+    return login(request, response=response, raw_request=raw_request)
+
+
+def login(
+    request: LoginRequest | str | None = None,
+    response: Response | str | None = None,
+    raw_request: Request | str | None = None,
+    *,
+    email: str | None = None,
+    password: str | None = None,
+    tenant_id: str | None = None,
+):
+    """Create a server-side enterprise session for the requested identity."""
+    if isinstance(request, LoginRequest):
+        login_request = request
+        response_obj = response
+        request_obj = raw_request if isinstance(raw_request, Request) else None
+    else:
+        resolved_password = response if isinstance(response, str) else password
+        resolved_tenant_id = raw_request if isinstance(raw_request, str) else tenant_id
+        if not isinstance(resolved_password, str):
+            raise TypeError("login() missing required password argument")
+        login_request = _coerce_login_request(
+            request,
+            password=resolved_password,
+            tenant_id=resolved_tenant_id,
+            email=email,
+        )
+        response_obj = None
+        request_obj = None
+
     with traced_span(
         "auth.login",
         kind=SpanKind.INTERNAL,
-        attributes={"tenant_id": request.tenant_id, "email": request.email},
-        workspace_id=request.tenant_id,
+        attributes={"tenant_id": login_request.tenant_id, "email": login_request.email},
+        workspace_id=login_request.tenant_id,
     ):
         try:
             session = login_enterprise_user(
-                email=request.email,
-                password=request.password,
-                tenant_id=request.tenant_id,
-                ip=raw_request.client.host if raw_request and raw_request.client else None,
-                user_agent=raw_request.headers.get("user-agent") if raw_request else None,
+                email=login_request.email,
+                password=login_request.password,
+                tenant_id=login_request.tenant_id,
+                ip=request_obj.client.host if request_obj and request_obj.client else None,
+                user_agent=request_obj.headers.get("user-agent") if request_obj else None,
             )
-            _set_session_cookie(response, session.get("session_token"))
+            if response_obj is not None:
+                _set_session_cookie(response_obj, session.get("session_token"))
             log_admin_event(
                 actor_user_id=session["user"]["user_id"],
                 actor_email=session["user"]["email"],
@@ -558,25 +454,25 @@ def login(request: LoginRequest, response: Response, raw_request: Request):
         except ValueError as exc:
             log_admin_event(
                 actor_user_id="anonymous",
-                actor_email=request.email,
+                actor_email=login_request.email,
                 actor_role="anonymous",
                 action="auth.login_failed",
                 target_type="user",
-                target_id=request.email,
-                tenant_id=request.tenant_id,
-                metadata={"workspace_id": request.tenant_id, "result": str(exc)},
+                target_id=login_request.email,
+                tenant_id=login_request.tenant_id,
+                metadata={"workspace_id": login_request.tenant_id, "result": str(exc)},
             )
             raise HTTPException(status_code=401, detail={"error": "invalid_credentials", "message": "Invalid credentials"})
         except PermissionError as exc:
             log_admin_event(
                 actor_user_id="anonymous",
-                actor_email=request.email,
+                actor_email=login_request.email,
                 actor_role="anonymous",
                 action="auth.login_failed",
                 target_type="user",
-                target_id=request.email,
-                tenant_id=request.tenant_id,
-                metadata={"workspace_id": request.tenant_id, "result": str(exc)},
+                target_id=login_request.email,
+                tenant_id=login_request.tenant_id,
+                metadata={"workspace_id": login_request.tenant_id, "result": str(exc)},
             )
             raise HTTPException(status_code=403, detail={"error": "tenant_forbidden", "message": str(exc)})
 
@@ -1018,179 +914,6 @@ def admin_get_events(
     return list_admin_events(limit=limit, offset=offset, action=action, tenant_id=tenant_id, workspace_id=workspace_id)
 
 
-@app.get("/admin/runtime", response_model=AdminRuntimeResponse)
-def admin_get_runtime(
-    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
-):
-    """Return a consolidated operational view for every tenant/workspace."""
-    _session = _require_permission(_session, "runtime.manage", workspace_id=_session.active_tenant.workspace_id)
-    telemetry = get_telemetry()
-    tenants = list_admin_tenants()
-
-    client = None
-    qdrant_ok = False
-    try:
-        client = get_client()
-        client.get_collections()
-        qdrant_ok = True
-    except Exception:
-        client = None
-        qdrant_ok = False
-
-    items: list[dict] = []
-    for tenant in tenants:
-        workspace_id = tenant["workspace_id"]
-        corpus = get_workspace_inventory(workspace_id)
-        retention = summarize_operational_retention(workspace_id)
-        snapshot = telemetry.get_operational_snapshot(days=7, workspace_id=workspace_id)
-        metrics = telemetry.get_metrics(days=7, workspace_id=workspace_id)
-        alerts = telemetry.get_alerts(days=1, workspace_id=workspace_id)
-        audits = telemetry.list_audit_events(workspace_id=workspace_id, days=30, limit=1, offset=0)
-        repairs = telemetry.list_repair_events(workspace_id=workspace_id, days=30, limit=1, offset=0)
-        qdrant_points = None
-        drift = {
-            "total_points": 0,
-            "canonical_points": 0,
-            "noncanonical_points": 0,
-            "noncanonical_documents": 0,
-            "noncanonical_document_ids": [],
-        }
-        if qdrant_ok and client is not None:
-            try:
-                drift = summarize_workspace_index_drift(workspace_id).model_dump()
-                qdrant_points = drift["total_points"]
-            except Exception:
-                qdrant_points = None
-                drift = {
-                    "total_points": 0,
-                    "canonical_points": 0,
-                    "noncanonical_points": 0,
-                    "noncanonical_documents": 0,
-                    "noncanonical_document_ids": [],
-                }
-
-        readiness = _compute_readiness_summary(
-            metrics=metrics,
-            alerts=alerts,
-            corpus=corpus,
-            qdrant_ok=qdrant_ok,
-            index_drift=drift,
-        )
-
-        items.append(
-            {
-                "tenant_id": tenant["tenant_id"],
-                "name": tenant["name"],
-                "workspace_id": workspace_id,
-                "plan": tenant["plan"],
-                "status": tenant["status"],
-                "document_count": corpus.get("documents", 0),
-                "chunk_count": corpus.get("chunks", 0),
-                "parsed_documents": corpus.get("parsed_documents", 0),
-                "partial_documents": corpus.get("partial_documents", 0),
-                "operational_documents": corpus.get("operational_documents", 0),
-                "operational_chunks": corpus.get("operational_chunks", 0),
-                "operational_retention_mode": retention.retention_mode,
-                "operational_retention_hours": retention.retention_hours,
-                "operational_cleanup_eligible_documents": retention.eligible_documents,
-                "operational_cleanup_eligible_chunks": retention.eligible_chunks,
-                "operational_cleanup_oldest_created_at": retention.oldest_eligible_created_at,
-                "qdrant_status": "ok" if qdrant_ok else "error",
-                "qdrant_points": qdrant_points,
-                "qdrant_canonical_points": drift.get("canonical_points", 0),
-                "qdrant_noncanonical_points": drift.get("noncanonical_points", 0),
-                "qdrant_noncanonical_documents": drift.get("noncanonical_documents", 0),
-                "alerts_active": alerts.get("total_active", 0),
-                "critical_alerts": sum(
-                    1
-                    for item in alerts.get("items", [])
-                    if item.get("status") == "firing" and item.get("severity") == "critical"
-                ),
-                "audit_events_30d": audits.get("total", 0),
-                "repair_events_30d": repairs.get("total", 0),
-                **readiness,
-                "latest_query_at": snapshot["queries"].get("latest_timestamp"),
-                "latest_ingestion_at": snapshot["ingestion"].get("latest_timestamp"),
-                "latest_evaluation_at": snapshot["evaluation"].get("latest_timestamp"),
-            }
-        )
-
-    return {
-        "items": items,
-        "total": len(items),
-        "qdrant_collection": QDRANT_COLLECTION,
-        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
-
-
-@app.post("/admin/runtime/prune-index", response_model=AdminQdrantPruneResponse)
-def admin_prune_workspace_index(
-    workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
-):
-    """Delete non-canonical Qdrant points for a workspace."""
-    _session = _require_permission(_session, "runtime.manage", workspace_id=workspace_id)
-    from services.integrity_service import prune_workspace_index_to_registry
-
-    try:
-        result = prune_workspace_index_to_registry(workspace_id=workspace_id)
-        log_admin_event(
-            actor_user_id=_session.user.user_id,
-            actor_email=_session.user.email,
-            actor_role=_session.user.role,
-            action="runtime.prune_index",
-            target_type="workspace",
-            target_id=workspace_id,
-            tenant_id=None,
-            metadata={
-                "workspace_id": workspace_id,
-                "deleted_points": result.deleted_points,
-                "deleted_documents": result.deleted_documents,
-                "deleted_document_ids": result.deleted_document_ids,
-                "canonical_points_remaining": result.canonical_points_remaining,
-                "total_points_remaining": result.total_points_remaining,
-            },
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "admin_prune_index_error", "message": str(e)})
-
-
-@app.post("/admin/runtime/cleanup-operational", response_model=AdminOperationalCleanupResponse)
-def admin_cleanup_operational_uploads(
-    workspace_id: str = Query(default="default"),
-    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
-):
-    """Delete operational uploads that are older than the tenant TTL."""
-    _session = _require_permission(_session, "runtime.manage", workspace_id=workspace_id)
-    from services.operational_retention_service import cleanup_operational_uploads
-
-    try:
-        result = cleanup_operational_uploads(workspace_id=workspace_id)
-        log_admin_event(
-            actor_user_id=_session.user.user_id,
-            actor_email=_session.user.email,
-            actor_role=_session.user.role,
-            action="runtime.cleanup_operational",
-            target_type="workspace",
-            target_id=workspace_id,
-            tenant_id=None,
-            metadata={
-                "workspace_id": workspace_id,
-                "retention_mode": result.retention_mode,
-                "retention_hours": result.retention_hours,
-                "deleted_documents": result.deleted_documents,
-                "deleted_chunks": result.deleted_chunks,
-                "deleted_document_ids": result.deleted_document_ids,
-                "remaining_operational_documents": result.remaining_operational_documents,
-                "remaining_operational_chunks": result.remaining_operational_chunks,
-            },
-        )
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"error": "admin_cleanup_operational_error", "message": str(e)})
-
-
 @app.get("/admin/alerts", response_model=ObservabilityAlertsResponse)
 def admin_get_observability_alerts(
     days: int = Query(default=1, ge=1, le=30),
@@ -1201,6 +924,8 @@ def admin_get_observability_alerts(
     try:
         tel = get_telemetry()
         return tel.get_alerts(days=days, workspace_id=workspace_id)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "admin_observability_alerts_error", "message": str(e)})
 
@@ -1222,6 +947,8 @@ def admin_get_observability_slo(
         except Exception:
             qdrant_ok = False
         return _build_slo_snapshot(metrics, workspace_id=workspace_id, qdrant_ok=qdrant_ok)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "admin_observability_slo_error", "message": str(e)})
 
@@ -1241,6 +968,8 @@ def admin_get_observability_traces(
             "workspace_id": workspace_id,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "admin_observability_traces_error", "message": str(e)})
 
@@ -1263,6 +992,8 @@ def admin_list_observability_audits(
             limit=limit,
             offset=offset,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "admin_observability_audits_error", "message": str(e)})
 
@@ -1285,6 +1016,8 @@ def admin_list_observability_repairs(
             limit=limit,
             offset=offset,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "admin_observability_repairs_error", "message": str(e)})
 

@@ -1,136 +1,40 @@
-# 0401 — AUDIT PLAN
+# 0401 - AUDIT PLAN
 
-## Plano de Auditoria — RAG Enterprise Premium
+## Objetivo
 
----
+Executar auditoria final GAP-12 e decidir se o programa pode sair de 99/100 para 100/100.
 
-## Áreas Auditadas
+## Plano De Execucao
 
-### 1. Runtime
-- Estabilidade do sistema
-- Latência de operações
-- Comportamento sob erro
-- Retry e recovery
+| Fase | Area | Evidencia esperada |
+|---|---|---|
+| 1 | PRD adherence | Funcionalidades core implementadas e testadas |
+| 2 | SPEC adherence | Contratos de API, dados, seguranca e observabilidade preservados |
+| 3 | Runtime | Backend e frontend executam em smoke real |
+| 4 | Logs | Request ID, traces, auditoria admin e eventos operacionais presentes |
+| 5 | Metricas | Health, metrics, SLO, alerts e runtime admin disponiveis |
+| 6 | Integracoes | Qdrant live, embeddings offline fallback, frontend/backend |
+| 7 | Integridade | Corpus canonico, reindex e isolamento por workspace |
+| 8 | Seguranca | RBAC, CORS, cookies, secrets e scanners |
+| 9 | Experiencia operacional | Rotas principais e workflows web via Playwright |
+| 10 | GAPs | Classificacao residual |
+| 11 | Remediacao | Plano para melhorias nao bloqueantes |
+| 12 | Relatorio final | Score e decisao |
 
-### 2. Fluxos
-- Fluxo de autenticação
-- Fluxo de upload/ingestion
-- Fluxo de retrieval/search
-- Fluxo de query RAG
+## Gates Planejados
 
-### 3. Integrações
-- OpenAI API
-- Qdrant
-- Filesystem
+| Gate | Comando |
+|---|---|
+| Backend sem Qdrant live | `pytest -q -rs src/tests` |
+| Backend com Qdrant live | `QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 pytest -q -rs src/tests` |
+| Qdrant reindex | `QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 python3 scripts/reindex_corpus.py default` |
+| Secret scan interno | `python3 src/scripts/scan_secrets.py` |
+| Gitleaks | `docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 dir /repo --config /repo/.gitleaks.toml --redact --no-banner --log-level warn` |
+| TypeScript | `npm exec -- tsc --noEmit` em `frontend/` |
+| Lint | `npm run lint` em `frontend/` |
+| Build | `npm run build` em `frontend/` |
+| Smoke E2E | `npm run test:smoke` em `frontend/` |
 
-### 4. Dados
-- Consistência de dados
-- Integridade referencial
-- Isolamento de tenant
+## Criterio De Aprovacao
 
-### 5. Segurança
-- Permissões RBAC
-- Acessos indevidos
-- Ações sensíveis auditadas
-
-### 6. Observabilidade
-- Logging estruturado
-- Métricas
-- Tracing
-- Alertas
-
----
-
-## Estratégia de Auditoria
-
-### Fase 0: Preparação
-- Definir escopo
-- Identificar fontes de evidência
-- Criar audit plan
-
-### Fase 1: Aderência ao PRD
-- Validar fluxos reais vs esperados
-- Verificar regras de negócio
-
-### Fase 2: Aderência à SPEC
-- Verificar arquitetura implementada
-- Validar contratos de API
-- Checar bounded contexts
-
-### Fase 3: Runtime
-- Analisar comportamento do sistema
-- Identificar pontos de falha
-
-### Fase 4-9: Logs, Métricas, Integrações, Dados, Segurança, UX
-- Audit detalhado por área
-
-### Fase 10: GAP Analysis
-- Consolidar problemas identificados
-
-### Fase 11: Remediação
-- Criar plano de ação
-
-### Fase 12: Relatório Final
-- Consolidar findings
-
----
-
-## Critérios de Análise
-
-### Completude
-- Todas as funcionalidades do PRD estão implementadas?
-
-### Correteza
-- O sistema se comporta conforme especificado?
-
-### Robustez
-- O sistema trata erros adequadamente?
-
-### Observabilidade
-- O sistema é investigável via logs/métricas?
-
-### Segurança
-- O sistema impede acessos indevidos?
-
----
-
-## Prioridades
-
-### P0 (Crítico)
-- RBAC enforced
-- Isolamento de tenant
-- Auth funcionando
-
-### P1 (Alto)
-- Logging estruturado
-- Health check
-- Error handling
-
-### P2 (Médio)
-- Métricas completas
-- Dashboard
-- Tracing
-
----
-
-## Método de Coleta
-
-### Code Review
-- Leitura de código fonte
-- Verificação de padrões
-- Identificação de anti-patterns
-
-### Document Review
-- SPEC vs implementação
-- PRD vs implementação
-- Build vs SPEC
-
-### Test Review
-- Cobertura de testes
-- Qualidade de assertions
-- Flakiness
-
-### Runtime Observation (futuro)
-- Logs em ambiente real
-- Métricas de produção
-- Comportamento sob carga
+Auditoria aprovada se todos os gates passarem, Qdrant live eliminar os skips, e nao houver gap critico ou importante aberto.

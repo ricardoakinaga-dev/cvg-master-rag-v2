@@ -5,30 +5,30 @@
 ## CONTEXTO
 - project: cvg-master-rag
 - current_engine: AUDIT
-- completion_status: ✅ RETRIEVAL OPERACIONAL REVALIDADO, RUNTIME LOCAL CORRIGIDO, SCORE DE RANKING NORMALIZADO E QUERIES COM SIGLAS CLÍNICAS DESCONTAMINADAS DE BIBLIOGRAFIA/CHUNKS FORA DE ESCOPO
+- completion_status: GAP-12 CONCLUIDO: AUDITORIA FINAL 100/100
 
 ## POSIÇÃO ATUAL
-- current_phase: AUDIT — RAG ANSWER QUALITY
-- current_task: confirmar por evidência real o comportamento do retrieval no Qdrant, corrigir descarte indevido de documentos operacionais, alinhar a qualidade/sinalização das respostas, eliminar saturação artificial do ranking híbrido e tratar queries clínicas com siglas ambíguas
+- current_phase: AUDIT - GAP-12_FINAL_98_100
+- current_task: Auditoria final 98-100 concluida
 
 ## STATUS
-- status: READY_FOR_NEXT_STEP
-- maturity: 95%
-- score_target: 96/100
+- status: COMPLETED
+- maturity: 100%
+- score_target: 100/100
 
 ## PROGRESSO
-- last_completed_action: queries clínicas com siglas passaram a ser expandidas antes da busca em `src/services/search_service.py` (ex.: `DRC` → `doença renal crônica`) e o retry neural automático foi bloqueado para queries dominadas por sigla, evitando contaminação por bibliografia/referências. Em paralelo, `src/services/vector_service.py` e `src/services/search_service.py` passaram a exigir suporte lexical de conteúdo, não apenas overlap genérico como `sintomas`/`gatos`. Testes de regressão foram adicionados em `src/tests/test_sprint5.py`. Validação final na API: a query `qual os sintomas de DRC em gatos` deixou de retornar chunks de bibliografia e gastro; o top 5 passou a ser composto por chunks renais/urinários (`1286`, `1265`, `1288`, `1283`, `1264`) e a resposta final permaneceu corretamente abstida por falta de suporte específico no corpus
-- next_action: revisar se vale reindexar ou segmentar melhor o capítulo urinário/renal do PDF veterinário, porque o retrieval já está limpo, mas o corpus ainda não traz um chunk explicitamente listando os sintomas específicos que a pergunta pede
+- last_completed_action: GAP-12 executado. Auditoria final aprovada com backend sem Qdrant `245 passed, 15 skipped`, backend com Qdrant live `260 passed`, secret scan/Gitleaks/TypeScript/lint/build verdes e Playwright smoke `7 passed`.
+- next_action: ciclo 98-100 concluido; abrir novo ciclo apenas para evolucoes futuras fora de GAP-01 a GAP-12.
 
 ## BLOQUEIOS
-- blockers: nenhum bloqueio crítico no runtime local; permanece apenas gap de conteúdo/segmentação no corpus veterinário para perguntas específicas sobre sintomas de DRC
+- blockers: nenhum bloqueio funcional P0 ativo; nenhum gap critico/importante aberto.
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: a rodada atual atacou a causa estrutural da baixa qualidade no corpus Markdown sem instalar dependências nem alterar a arquitetura base do RAG
+- decision_description: nenhuma decisao humana requerida para o ciclo 98-100; futuras evolucoes devem iniciar novo ciclo.
 
 ## TIMESTAMP
-- last_update: 2026-04-22T23:18:00-03:00
+- last_update: 2026-04-30T02:45:00-03:00
 
 ---
 
@@ -61,6 +61,23 @@ O agente DEVE:
 | 2026-04-22 | AUDIT | COMPLETED | RETRIEVAL_RUNTIME_DEBUG | Filtro implícito de `catalog_scope` removido, backend local reiniciado com `.env` e sinalização de abstenção alinhada ao payload do chat | READY_FOR_NEXT_STEP |
 | 2026-04-22 | AUDIT | COMPLETED | RANKING_SCORE_NORMALIZATION | Normalização do score híbrido eliminou empates artificiais em `1.0` e devolveu gradação útil aos resultados do retrieval | READY_FOR_NEXT_STEP |
 | 2026-04-22 | AUDIT | COMPLETED | CLINICAL_ACRONYM_RETRIEVAL | Expansão de siglas clínicas e bloqueio do retry neural removeram chunks de bibliografia/fora de escopo em queries veterinárias abreviadas | READY_FOR_NEXT_STEP |
+| 2026-04-27 | AUDIT | COMPLETED | P0_EXECUTION | FECHAMENTO P0 (BE-01 a BE-10): correção de autorização/session/CORS, observability e atualização documental | COMPLETED |
+| 2026-04-27 | AUDIT | COMPLETED | SECOND_DEEP_AUDIT | Segunda auditoria profunda com backend 238 passed, frontend lint/build verdes, Playwright 7 passed e CORS Playwright coberto por teste | COMPLETED |
+| 2026-04-27 | AUDIT | COMPLETED | DEBT_CLOSEOUT | Débitos finais resolvidos: TestClient warning, secret scan CI, Qdrant live CI, migrations policy e README raiz | COMPLETED |
+| 2026-04-28 | AUDIT | COMPLETED | REAL_STATE_RECONCILIATION | Auditoria do estado real com backend 238 passed/15 skipped, secret scan, TypeScript, lint, build e Playwright 7 passed; score auditado 95/100 | COMPLETED |
+| 2026-04-28 | BUILD | COMPLETED | GAP_CLOSEOUT_PLANNING | Plano executivo, roadmap e backlog criados para fechamento 98-100 dos gaps residuais | READY_FOR_NEXT_STEP |
+| 2026-04-28 | BUILD | COMPLETED | GAP-01_SCORE_RECONCILIATION | Score canonico reconciliado: 95/100 atual, 98-100 meta; build gate 100% classificado como historico | READY_FOR_NEXT_STEP |
+| 2026-04-28 | BUILD | COMPLETED | GAP-02_RESIDUAL_CLOSEOUT_REPORT | Relatorio canonico de fechamento residual criado, consolidando gaps e gates para 98-100 | READY_FOR_NEXT_STEP |
+| 2026-04-29 | BUILD | COMPLETED | GAP-03_QDRANT_LIVE | Qdrant live local validado em porta isolada 6337; backend `253 passed` sem skips | READY_FOR_NEXT_STEP |
+| 2026-04-29 | BUILD | COMPLETED | GAP-04_QDRANT_RUNBOOK | Comando padrao de Qdrant local documentado em README, src/README e runbook de migrations | READY_FOR_NEXT_STEP |
+| 2026-04-29 | BUILD | COMPLETED | GAP-05_EMBEDDING_MODEL | `EMBEDDING_MODEL` corrigida como variavel primaria com fallback legado e teste automatizado | READY_FOR_NEXT_STEP |
+| 2026-04-29 | BUILD | COMPLETED | GAP-06_GAP-07_CORS_COOKIES | CORS e cookies endurecidos com testes de origem permitida/negada e atributos de sessao por ambiente | READY_FOR_NEXT_STEP |
+| 2026-04-29 | BUILD | COMPLETED | GAP-08_GITLEAKS | Gitleaks integrado como scanner complementar ao scanner interno de secrets no CI | READY_FOR_NEXT_STEP |
+| 2026-04-30 | AUDIT | COMPLETED | ROADMAP_GAPS_98_100_VERIFICATION | Verificacao do roadmap 98-100 encontrou backend/security/build verdes, mas Playwright smoke `6 passed, 1 failed` | BLOCKED |
+| 2026-04-30 | AUDIT | COMPLETED | E2E_SMOKE_STABILIZATION | Playwright smoke estabilizado com build/start em producao; `npm run test:smoke` fechou `7 passed` | READY_FOR_NEXT_STEP |
+| 2026-04-30 | BUILD | COMPLETED | GAP-09_GAP-10_HEALTH_ROUTER | Primeiro corte de `src/api/main.py` entregue com `src/api/health_routes.py`; backend `245 passed, 15 skipped` e Playwright `7 passed` | READY_FOR_NEXT_STEP |
+| 2026-04-30 | BUILD | COMPLETED | GAP-11_ADMIN_RUNTIME_MODULARIZATION | Runtime admin extraido para router dedicado e testes movidos para `src/tests/test_admin_runtime_routes.py`; backend `245 passed, 15 skipped` e Playwright `7 passed` | READY_FOR_NEXT_STEP |
+| 2026-04-30 | AUDIT | COMPLETED | GAP-12_FINAL_98_100 | Auditoria final aprovada com Qdrant live `260 passed`, Playwright `7 passed`, scanners verdes e score `100/100` | COMPLETED |
 
 ---
 
@@ -72,19 +89,19 @@ O agente DEVE:
 | PRD | 0090_prd_validation.md | APROVADO |
 | SPEC | 0190_spec_validation.md | APROVADO |
 | BUILD | 0390_build_gate.md | APROVADO |
-| AUDIT | docs/04_audit/2026-04-22-reaudit-p4-final.md | 95/100 |
+| AUDIT | docs/04_audit/0490_audit_report.md | 100/100 |
 
 ---
 
 ## SCORE GERAL
 
 ### Score Atual
-- current_score: 95/100
-- target_score: 96/100
+- current_score: 100/100
+- target_score: 100/100
+- assessed_score: 100/100
 
 ### Gaps Críticos Abertos
-- Nenhum gap crítico aberto no fluxo de login/sessão
+- Nenhum gap critico ou importante aberto no ciclo 98-100.
 
 ### Próximas Ações
-1. Rerodar gates completos se quiser reconsolidar o score após a correção local de login
-2. Publicar próximo fechamento formal de auditoria
+1. Ciclo 98-100 concluido. Proximas evolucoes devem iniciar novo ciclo CVG.

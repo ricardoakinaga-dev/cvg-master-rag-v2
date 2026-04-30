@@ -22,7 +22,7 @@ export default defineConfig({
     },
     {
       command:
-        "bash -lc 'NEXT_DIST_DIR=.next-playwright NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010 ./node_modules/.bin/next dev -H 127.0.0.1 -p 3015'",
+        "bash -lc 'rm -rf .next-playwright && NEXT_DIST_DIR=.next-playwright NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010 ./node_modules/.bin/next build && NEXT_DIST_DIR=.next-playwright NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8010 ./node_modules/.bin/next start -H 127.0.0.1 -p 3015'",
       url: "http://127.0.0.1:3015",
       reuseExistingServer: false,
       timeout: 120_000,

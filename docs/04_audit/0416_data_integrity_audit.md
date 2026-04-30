@@ -1,77 +1,24 @@
-# 0416 — DATA INTEGRITY AUDIT
+# 0416 - DATA INTEGRITY AUDIT
 
-## Auditoria de Integridade de Dados — RAG Enterprise Premium
+## Resultado
 
----
+Classificacao geral: aderente.
 
-## Consistência
+## Evidencias
 
-| Aspecto | SPEC (0110) | Implementação | Status |
-|---|---|---|---|
-| Document + Chunks atomic | ✅ RN-02 | ⚠️ Planejado | ⚠️ Parcial |
-| Session expiry | ✅ RN-03 | ⚠️ Planejado | ⚠️ Parcial |
-| Tenant deletion protection | ✅ RN-04 | ⚠️ Planejado | ⚠️ Parcial |
-| Workspace isolation | ✅ RN-01 | ⚠️ Planejado | ⚠️ Parcial |
-
----
-
-## Integridade Referencial
-
-| Relação | Integridade | Status |
+| Area | Evidencia | Status |
 |---|---|---|
-| User → Workspace | ✅ Requerido | ⚠️ Planejado |
-| Document → Workspace | ✅ Requerido | ⚠️ Planejado |
-| Chunk → Document | ✅ Requerido | ⚠️ Planejado |
-| Session → User | ✅ Requerido | ⚠️ Planejado |
+| Corpus canonico | Reindex considerou 5 documentos canonicos | Aderente |
+| Arquivos nao canonicos | Reindex ignorou raws nao canonicos | Aderente |
+| Chunks | 11 pontos indexados para workspace `default` | Aderente |
+| Qdrant count | `Qdrant workspace points count: 11` | Aderente |
+| Tenant isolation | Non-leakage suite e testes cross-workspace | Aderente |
+| Repair/audit | Corpus audit e repair endpoints cobertos por testes | Aderente |
 
----
+## Resultado Live
 
-## Dados Órfãos
+`QDRANT_HOST=127.0.0.1 QDRANT_PORT=6337 pytest -q -rs src/tests` fechou `260 passed`.
 
-| Verificação | Status |
-|---|---|
-| Chunks sem Document | ⚠️ Planejado (cascade delete) |
-| Users sem Workspace | ⚠️ Planejado (cascade delete) |
-| Sessions sem User | ⚠️ Planejado (cascade delete) |
+## Findings
 
----
-
-## Dados Inválidos
-
-| Verificação | Status |
-|---|---|---|
-| Email format validation | ⚠️ Planejado |
-| Role validation | ⚠️ Planejado |
-| Workspace_id UUID format | ⚠️ Planejado |
-| Timestamp ISO8601 | ⚠️ Planejado |
-
----
-
-## Histórico
-
-| Aspecto | Implementação | Status |
-|---|---|---|
-| Audit log | ✅ Planejado | ⚠️ Planejado |
-| Session history | ⚠️ Planejado | ⚠️ Planejado |
-| Admin actions log | ✅ Planejado | ⚠️ Planejado |
-
----
-
-## Data Validation Points
-
-| Point | Validation | Status |
-|---|---|---|
-| /auth/login | Email format, password non-empty | ⚠️ Planejado |
-| /documents/upload | File type, max size | ⚠️ Planejado |
-| /tenants POST | Name non-empty | ⚠️ Planejado |
-| /users POST | Email, role, workspace_id | ⚠️ Planejado |
-
----
-
-## Avaliação
-
-| Classificação | Definição | Status |
-|---|---|---|
-| Robusta | Full referential integrity | ⏳ Meta |
-| Parcial | Basic validation | ⚠️ Planejado |
-| Frágil | No validation | ❌ |
+Sem gap bloqueante de integridade. A manutencao futura deve continuar evitando que arquivos operacionais temporarios sejam tratados como corpus canonico.
