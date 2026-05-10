@@ -839,6 +839,46 @@ COMPLETED
 
 ---
 
+## ENTRY: PUSH TO CVG MASTER RAG V2
+
+### TIMESTAMP
+2026-05-10 19:48
+
+### ENGINE
+REPO_SYNC
+
+### PHASE
+GITHUB_PUSH
+
+### SPRINT
+CVG_MASTER_RAG_V2
+
+### TASK
+Criar commit e enviar o estado consolidado do repositorio para `https://github.com/ricardoakinaga-dev/cvg-master-rag-v2`.
+
+### ACTION
+- verificado status do worktree, branch e remote
+- adicionado ignore para `.runtime/` e `src/logs/*.log` para impedir publicacao de artefatos operacionais
+- executado `python3 src/scripts/scan_secrets.py`
+- validado `git diff --cached --check`
+- criado commit principal `2ee44ff`
+- remote `origin` atualizado para `https://github.com/ricardoakinaga-dev/cvg-master-rag-v2.git`
+- executado `git push -u origin main`
+
+### RESULT
+- push aceito pelo GitHub sem force
+- branch local `main` passou a rastrear `origin/main`
+- `.env`, backups de `.env`, `.runtime/`, `src/data/`, logs JSONL e logs `.log` permaneceram ignorados
+
+### DECISIONS
+- nao usar `--force`
+- nao versionar PDFs, storage Qdrant, `.env` real ou logs operacionais
+
+### STATUS
+COMPLETED
+
+---
+
 ## ENTRY: MOTHERS DAY CANINE REPRODUCTION RAG MATERIAL
 
 ### TIMESTAMP

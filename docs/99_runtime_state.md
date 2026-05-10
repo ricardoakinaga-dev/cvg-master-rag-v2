@@ -4,12 +4,12 @@
 
 ## CONTEXTO
 - project: cvg-master-rag
-- current_engine: RUNTIME_QUERY
-- completion_status: RAG_EDUCATIONAL_MATERIAL_READY
+- current_engine: REPO_SYNC
+- completion_status: PUSHED_TO_GITHUB_V2
 
 ## POSIÇÃO ATUAL
 - current_phase: VETERINARY_CLINICAL_CHAT_RAG
-- current_task: Consultar a base RAG `cvg_master_rag` para material educativo de Dia das Maes sobre cio e gestacao em cadelas.
+- current_task: Publicar estado consolidado do repositorio no GitHub `cvg-master-rag-v2`.
 
 ## STATUS
 - status: READY_FOR_NEXT_STEP
@@ -17,18 +17,18 @@
 - score_target: 100/100
 
 ## PROGRESSO
-- last_completed_action: Base RAG `cvg_master_rag` consultada via endpoint local `/external/chat` e leitura de chunks; evidencias recuperadas sobre ciclo estral, janela fertil, citologia/vaginoscopia, duracao da gestacao, estimativa de parto e sinais de alerta em cadelas.
-- next_action: Usar o texto educativo gerado como base para arte/post de Dia das Maes; validar linguagem final e identidade visual antes de publicar.
+- last_completed_action: Remote `origin` atualizado para `https://github.com/ricardoakinaga-dev/cvg-master-rag-v2.git`; commit principal `2ee44ff` criado e enviado para `main` com consolidacao das atualizacoes clinicas/RAG e documentacao operacional.
+- next_action: Confirmar no GitHub se o repositorio `cvg-master-rag-v2` esta com branch `main` atualizada e seguir novo ciclo CVG conforme proxima demanda.
 
 ## BLOQUEIOS
-- blockers: nenhum bloqueio tecnico; consulta ampla em portugues para gestacao retornou baixa evidencia inicialmente, mitigada com consulta direcionada em ingles e verificacao dos chunks recuperados.
+- blockers: nenhum bloqueio tecnico; push normal aceito sem force.
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: Usuario solicitou material educativo baseado na base RAG; nao houve decisao de negocio nem alteracao de escopo tecnico.
+- decision_description: Usuario solicitou git commit e push para o repositorio GitHub v2; executado sem force push e com varredura de segredos antes do commit.
 
 ## TIMESTAMP
-- last_update: 2026-05-10T18:19:10+00:00
+- last_update: 2026-05-10T19:48:12+00:00
 
 ---
 
@@ -167,6 +167,7 @@ O agente DEVE:
 | 2026-05-08 | BUILD/RUNTIME_FIX | VETERINARY_CLINICAL_CHAT_RAG | RICK_PROFESSOR_PASSTHROUGH_RAG | Filtros locais pos-Qdrant removidos da rota LLM, hits sem classificacao mantidos como evidencias e runtime real retornou high/grounded com 4 citacoes | READY_FOR_NEXT_STEP |
 | 2026-05-08 | BUILD/RUNTIME_FIX | EXTERNAL_INTEGRATION | EXTERNAL_CHAT_ENDPOINT | Endpoint `/external/chat` com `X-API-Key` criado, documentado, testado e validado em runtime publico retornando resposta do chat clinico | READY_FOR_NEXT_STEP |
 | 2026-05-10 | RUNTIME_QUERY | RAG_DATABASE | MOTHERS_DAY_CANINE_REPRODUCTION | Consulta RAG para material educativo sobre cio e gestacao em cadelas; evidencias recuperadas de Semiologia Veterinaria, Ettinger, Blackwell Five-Minute Consult e Surgery-2nd | READY_FOR_NEXT_STEP |
+| 2026-05-10 | REPO_SYNC | GITHUB_PUSH | CVG_MASTER_RAG_V2 | Commit principal `2ee44ff` enviado para `https://github.com/ricardoakinaga-dev/cvg-master-rag-v2.git` na branch `main`; `.runtime/` e logs operacionais ficaram ignorados | READY_FOR_NEXT_STEP |
 
 ---
 
