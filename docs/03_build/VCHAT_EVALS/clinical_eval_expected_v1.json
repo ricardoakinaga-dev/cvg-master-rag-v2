@@ -1,0 +1,77 @@
+{
+  "fixture_id": "veterinary_clinical_chat_expected_v1",
+  "version": "1.0",
+  "dataset_id": "veterinary_clinical_chat_v1",
+  "fixtures": [
+    {
+      "question_id": "vchat-gastroenterite-cao-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": ["tratamento_cirurgico"],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-hepatopatia-cao-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": ["tratamento_cirurgico"],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-convulsao-cao-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": ["tratamento_cirurgico"],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-drc-gato-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": ["tratamento_cirurgico"],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-pancreatite-cao-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": ["tratamento_cirurgico"],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-piometra-cadela-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "tratamento_cirurgico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": [],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    },
+    {
+      "question_id": "vchat-obstrucao-uretral-gato-001",
+      "required_sections": ["resumo", "historico_resenha", "sinais_sintomas", "exames_complementares", "tratamento_clinico", "tratamento_cirurgico", "proximos_passos", "referencias"],
+      "allowed_missing_sections": [],
+      "min_bibliography_references": 1,
+      "required_reference_fields": ["document_filename", "page", "chunk_id", "sections"],
+      "required_footer_heading": "## Referencias bibliograficas",
+      "required_guardrails": ["scope_preserved", "translation_context_preserved", "bibliographic_grounding", "unsupported_claims"],
+      "forbidden_response_patterns": ["nao sei", "nao tenho informacoes suficientes", "sem referencias bibliograficas"]
+    }
+  ]
+}

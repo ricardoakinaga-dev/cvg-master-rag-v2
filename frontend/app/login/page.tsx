@@ -30,6 +30,11 @@ function LoginContent() {
     setNextPath(next && next.startsWith("/") ? next : "/");
   }, []);
 
+  useEffect(() => {
+    if (!session?.authenticated || session.session_state !== "active") return;
+    router.replace(nextPath as Route);
+  }, [nextPath, router, session]);
+
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -46,7 +51,7 @@ function LoginContent() {
         description: "Você entrou no console enterprise com contexto de tenant.",
         intent: "success",
       });
-      router.push(nextPath as Route);
+      router.replace(nextPath as Route);
     } catch (error) {
       pushToast({
         title: "Falha no login",

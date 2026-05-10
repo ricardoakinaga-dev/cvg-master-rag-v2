@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { api } from "@/lib/api";
+import { api, setApiSessionToken } from "@/lib/api";
 import type {
   EnterpriseSession,
   LoginRequest,
@@ -116,10 +116,13 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
       .current()
       .then((response) => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
-        setSession(normalizeSession(response));
+        const normalized = normalizeSession(response);
+        setApiSessionToken(normalized.authenticated ? normalized.session_token : null);
+        setSession(normalized);
       })
       .catch(() => {
         if (!active || bootstrapRequestRef.current !== requestId) return;
+        setApiSessionToken(null);
         setSession(asAnonymousSession(null));
       })
       .finally(() => {
@@ -139,6 +142,7 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         bootstrapRequestRef.current += 1;
         const response = await api.session.login(request);
         const normalized = normalizeSession(response);
+        setApiSessionToken(normalized.authenticated ? normalized.session_token : null);
         setSession(normalized);
         return normalized;
       },
@@ -149,12 +153,15 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
         } catch {
           // Best effort only.
         }
+        setApiSessionToken(null);
         setSession((current) => asAnonymousSession(current));
       },
       switchTenant: async (tenantId: string) => {
         bootstrapRequestRef.current += 1;
         const response = await api.session.switchTenant(tenantId);
-        setSession(normalizeSession(response));
+        const normalized = normalizeSession(response);
+        setApiSessionToken(normalized.authenticated ? normalized.session_token : null);
+        setSession(normalized);
       },
       requestRecovery: async (request: RecoveryRequest) => {
         const response = await api.session.requestPasswordReset({ email: request.email, tenant_id: request.tenant_id });
@@ -166,6 +173,7 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
       },
       changePassword: async (request: PasswordChangeRequest) => {
         const response = await api.session.changePassword(request);
+        setApiSessionToken(null);
         setSession((current) => asAnonymousSession(current));
         return response.message;
       },
@@ -180,7 +188,9 @@ export function EnterpriseSessionProvider({ children }: { children: ReactNode })
       refresh: async () => {
         bootstrapRequestRef.current += 1;
         const response = await api.session.current();
-        setSession(normalizeSession(response));
+        const normalized = normalizeSession(response);
+        setApiSessionToken(normalized.authenticated ? normalized.session_token : null);
+        setSession(normalized);
       },
     };
   }, [ready, session]);

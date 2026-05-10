@@ -1,6 +1,7 @@
 export type HealthResponse = {
   status: "healthy" | "degraded";
   version: string;
+  mode?: "light" | "full";
   workspace_id?: string | null;
   qdrant?: {
     status: "ok" | "error";
@@ -51,7 +52,7 @@ export type DocumentListItem = DocumentMetadata & {
 
 export type DocumentUploadResponse = {
   document_id: string;
-  status: "parsed" | "failed" | "partial";
+  status: "parsed" | "failed" | "partial" | "queued" | "processing";
   catalog_scope: "canonical" | "operational";
   source_type: string;
   filename: string;
@@ -59,6 +60,52 @@ export type DocumentUploadResponse = {
   char_count: number;
   chunk_count: number;
   created_at: string;
+  chunking_strategy?: string;
+  ingestion_id?: string | null;
+  message?: string | null;
+};
+
+export type DocumentIngestionJobStatus = {
+  ingestion_id: string;
+  document_id: string;
+  final_document_id?: string | null;
+  workspace_id: string;
+  filename: string;
+  source_type: string;
+  file_size_bytes?: number | null;
+  large_job: boolean;
+  resource_profile?: string | null;
+  resource_isolation_mode?: string | null;
+  resource_limits: Record<string, unknown>;
+  status: "pending" | "processing" | "committed" | "failed" | "aborted";
+  page_count?: number | null;
+  pages_processed: number;
+  chunks_written: number;
+  qdrant_points_written: number;
+  rss_peak_mb?: number | null;
+  last_heartbeat_at?: string | null;
+  last_batch_at?: string | null;
+  pages_per_minute?: number | null;
+  chunks_per_minute?: number | null;
+  seconds_since_last_batch?: number | null;
+  operational_status?: "pending" | "running" | "warning" | "stalled" | "failed" | "completed" | null;
+  operational_alerts?: Array<{
+    code?: string;
+    severity?: "warning" | "critical" | string;
+    message?: string;
+  }>;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+};
+
+export type DocumentIngestionJobListResponse = {
+  items: DocumentIngestionJobStatus[];
+  total: number;
+  limit: number;
+  workspace_id: string;
 };
 
 export type SearchFilters = {
@@ -73,7 +120,8 @@ export type RetrievalProfile =
   | "hybrid"
   | "hyde_hybrid"
   | "semantic_hybrid"
-  | "semantic_hyde_hybrid";
+  | "semantic_hyde_hybrid"
+  | "clinical_v2";
 
 export type SearchResultItem = {
   chunk_id: string;
@@ -121,10 +169,40 @@ export type Citation = {
   page?: number | null;
   text: string;
   score: number;
+  section?: string | null;
+  sections?: string[];
+};
+
+export type ClinicalSectionKey =
+  | "resumo"
+  | "historico_resenha"
+  | "sinais_sintomas"
+  | "exames_complementares"
+  | "tratamento_clinico"
+  | "tratamento_cirurgico"
+  | "proximos_passos"
+  | "referencias";
+
+export type ClinicalAnswerSections = Partial<Record<ClinicalSectionKey, string | null>>;
+
+export type ClinicalBibliographyReference = {
+  chunk_id: string;
+  document_id?: string | null;
+  document_filename?: string | null;
+  page?: number | null;
+  sections: ClinicalSectionKey[];
+};
+
+export type ClinicalResponseGuardrails = {
+  scope_preserved: boolean;
+  translation_context_preserved: boolean;
+  unsupported_claims: string[];
+  bibliographic_grounding: boolean;
 };
 
 export type QueryResponse = {
   answer: string;
+  answer_markdown?: string | null;
   chunks_used: string[];
   citations: Citation[];
   confidence: "high" | "medium" | "low";
@@ -141,6 +219,15 @@ export type QueryResponse = {
   query_expansion_requested?: boolean;
   query_expansion_mode?: "off" | "always" | "adaptive" | null;
   query_expansion_decision_reason?: string | null;
+  sections?: ClinicalAnswerSections | null;
+  bibliography?: ClinicalBibliographyReference[];
+  bibliography_footer?: string | null;
+  missing_sections?: ClinicalSectionKey[];
+  guardrails?: ClinicalResponseGuardrails | null;
+  completeness_status?: "sufficient" | "partial" | null;
+  completeness_note?: string | null;
+  section_citation_map?: Record<string, string[]>;
+  section_grounding?: Record<string, boolean>;
 };
 
 export type EvaluationQuestion = {

@@ -88,19 +88,29 @@ SESSION_COOKIE_SAMESITE = _resolve_session_cookie_samesite()
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "240"))
 
+# Future persistence scale triggers.
+# The 400MB release intentionally keeps a single atomic *_chunks.json file.
+# If either threshold is reached, the next scaling task must migrate chunks to
+# JSONL shards before raising upload limits further.
+CHUNKS_JSONL_SHARD_TRIGGER_CHUNK_COUNT = int(os.getenv("CHUNKS_JSONL_SHARD_TRIGGER_CHUNK_COUNT", "100000"))
+CHUNKS_JSONL_SHARD_TRIGGER_FILE_BYTES = int(os.getenv("CHUNKS_JSONL_SHARD_TRIGGER_FILE_BYTES", "524288000"))
+
 # Retrieval config
 DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "5"))
-DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", "0.70"))
+DEFAULT_THRESHOLD = float(os.getenv("DEFAULT_THRESHOLD", "0.25"))
 
 # RRF k parameter
 RRF_K = 60
 
 # Reranking config
-RERANKING_ENABLED = _env_bool("RERANKING_ENABLED", False)
+RERANKING_ENABLED = _env_bool("RERANKING_ENABLED", True)
 RERANKING_METHOD = os.getenv("RERANKING_METHOD", "bm25f")  # "bm25f", "neural", or "none"
 
 # Query expansion config (HyDE-like)
 QUERY_EXPANSION_ENABLED = _env_bool("QUERY_EXPANSION_ENABLED", False)
+
+# External chat integration
+EXTERNAL_CHAT_API_KEY = os.getenv("EXTERNAL_CHAT_API_KEY", "")
 
 # Supported formats
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".md", ".txt"}

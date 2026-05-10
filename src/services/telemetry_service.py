@@ -4,6 +4,7 @@ Implements structured JSON Lines logging and daily metric aggregation.
 """
 import json
 import shutil
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,10 +25,12 @@ class TelemetryService:
 
     QUERIES_LOG = LOGS_DIR / "queries.jsonl"
     INGEST_LOG = LOGS_DIR / "ingestion.jsonl"
+    INGEST_BATCH_LOG = LOGS_DIR / "ingestion_batches.jsonl"
     REINDEX_LOG = LOGS_DIR / "reindex.jsonl"
     EVAL_LOG = LOGS_DIR / "evaluations.jsonl"
     AUDIT_LOG = LOGS_DIR / "audit.jsonl"
     REPAIR_LOG = LOGS_DIR / "repair.jsonl"
+    CLINICAL_PLANNER_LOG = LOGS_DIR / "clinical_planner.jsonl"
 
     def __init__(self):
         self._ensure_logs()
@@ -35,7 +38,16 @@ class TelemetryService:
     def _ensure_logs(self):
         """Ensure log directory and files exist."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        for log_file in [self.QUERIES_LOG, self.INGEST_LOG, self.REINDEX_LOG, self.EVAL_LOG, self.AUDIT_LOG, self.REPAIR_LOG]:
+        for log_file in [
+            self.QUERIES_LOG,
+            self.INGEST_LOG,
+            self.INGEST_BATCH_LOG,
+            self.REINDEX_LOG,
+            self.EVAL_LOG,
+            self.AUDIT_LOG,
+            self.REPAIR_LOG,
+            self.CLINICAL_PLANNER_LOG,
+        ]:
             if not log_file.exists():
                 log_file.write_text("")
 
@@ -71,6 +83,12 @@ class TelemetryService:
         expansion_latency_ms: int = 0,
         query_expansion_mode: Optional[str] = None,
         query_expansion_decision_reason: Optional[str] = None,
+        retrieval_profile: Optional[str] = None,
+        detected_language: Optional[str] = None,
+        translation_applied: Optional[bool] = None,
+        translation_blocked: Optional[bool] = None,
+        translation_blocked_reason: Optional[str] = None,
+        translated_query_hash: Optional[str] = None,
     ):
         """
         Log a single query event to queries.jsonl.
@@ -108,6 +126,12 @@ class TelemetryService:
             "expansion_latency_ms": expansion_latency_ms,
             "query_expansion_mode": query_expansion_mode,
             "query_expansion_decision_reason": query_expansion_decision_reason,
+            "retrieval_profile": retrieval_profile,
+            "detected_language": detected_language,
+            "translation_applied": translation_applied,
+            "translation_blocked": translation_blocked,
+            "translation_blocked_reason": translation_blocked_reason,
+            "translated_query_hash": translated_query_hash,
         }
         self._append(self.QUERIES_LOG, event)
 
@@ -142,6 +166,112 @@ class TelemetryService:
         if embedding_status is not None:
             event["embedding_status"] = embedding_status
         self._append(self.INGEST_LOG, event)
+
+    def log_clinical_query_plan(
+        self,
+        *,
+        original_query: str,
+        detected_language: str,
+        species: Optional[str],
+        clinical_problem: Optional[str],
+        organ_system: Optional[str],
+        intent: str,
+        canonical_terms_pt: list[str],
+        canonical_terms_en: list[str],
+        synonyms: list[str],
+        required_terms: list[str],
+        low_signal_terms: list[str],
+        desired_sections: list[str],
+        query_variants: list,
+        scope_warning: Optional[str],
+        planner_notes: Optional[str],
+        answers_user: bool,
+        generated_by: str,
+        latency_ms: int,
+        validation_status: str,
+        validation_error: Optional[str] = None,
+        fallback_reason: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ):
+        """Log a safe, auditable clinical planner event without raw user text."""
+        variants = [self._safe_variant_snapshot(variant) for variant in query_variants]
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "clinical_query_plan",
+            "request_id": request_id or get_request_id(),
+            "trace_id": get_trace_id(),
+            "query_hash": self._hash_text(original_query),
+            "query_length": len(original_query or ""),
+            "detected_language": detected_language,
+            "species": species,
+            "clinical_problem": clinical_problem,
+            "organ_system": organ_system,
+            "intent": intent,
+            "canonical_terms_pt": canonical_terms_pt,
+            "canonical_terms_en": canonical_terms_en,
+            "synonyms": synonyms,
+            "required_terms": required_terms,
+            "low_signal_terms": low_signal_terms,
+            "desired_sections": desired_sections,
+            "variant_count": len(variants),
+            "variant_types": [variant["variant_type"] for variant in variants],
+            "variant_hashes": [variant["query_hash"] for variant in variants],
+            "variants": variants,
+            "scope_warning": scope_warning,
+            "planner_notes": planner_notes,
+            "answers_user": answers_user,
+            "generated_by": generated_by,
+            "latency_ms": latency_ms,
+            "validation_status": validation_status,
+            "validation_error": validation_error,
+            "fallback_reason": fallback_reason,
+        }
+        self._append(self.CLINICAL_PLANNER_LOG, event)
+
+    def log_ingestion_batch(
+        self,
+        *,
+        ingestion_id: Optional[str],
+        document_id: str,
+        workspace_id: str,
+        filename: str,
+        batch_index: int,
+        page_start: Optional[int],
+        page_end: Optional[int],
+        chars_extracted: int,
+        chunks_created: int,
+        embeddings_created: int,
+        points_indexed: int,
+        rss_mb: Optional[float],
+        rss_peak_mb: Optional[float],
+        duration_ms: int,
+        status: str,
+        error: Optional[str] = None,
+    ):
+        """Log per-batch ingestion progress for large documents."""
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "type": "ingestion_batch",
+            "request_id": get_request_id(),
+            "trace_id": get_trace_id(),
+            "ingestion_id": ingestion_id,
+            "document_id": document_id,
+            "workspace_id": workspace_id,
+            "filename": filename,
+            "batch_index": batch_index,
+            "page_start": page_start,
+            "page_end": page_end,
+            "chars_extracted": chars_extracted,
+            "chunks_created": chunks_created,
+            "embeddings_created": embeddings_created,
+            "points_indexed": points_indexed,
+            "rss_mb": rss_mb,
+            "rss_peak_mb": rss_peak_mb,
+            "duration_ms": duration_ms,
+            "status": status,
+            "error": error,
+        }
+        self._append(self.INGEST_BATCH_LOG, event)
 
     def log_reindex(
         self,
@@ -283,6 +413,7 @@ class TelemetryService:
 
         queries = self._filter_workspace(self._read_log(self.QUERIES_LOG, cutoff), workspace_id)
         ingestion_events = self._filter_workspace(self._read_log(self.INGEST_LOG, cutoff), workspace_id)
+        ingestion_batch_events = self._filter_workspace(self._read_log(self.INGEST_BATCH_LOG, cutoff), workspace_id)
         evaluation_events = self._filter_workspace(self._read_log(self.EVAL_LOG, cutoff), workspace_id)
 
         retrieval_metrics = self._aggregate_retrieval(queries, evaluation_events)
@@ -295,6 +426,7 @@ class TelemetryService:
         return {
             "retrieval": retrieval_metrics,
             "ingestion": ingestion_metrics,
+            "ingestion_batches": self._aggregate_ingestion_batches(ingestion_batch_events),
             "answer": answer_metrics,
             "evaluation": evaluation_metrics,
             "chunking": chunking_metrics,
@@ -311,6 +443,7 @@ class TelemetryService:
         cutoff = datetime.now(timezone.utc).timestamp() - (days * 86400)
         queries = self._filter_workspace(self._read_log(self.QUERIES_LOG, cutoff), workspace_id)
         ingestion_events = self._filter_workspace(self._read_log(self.INGEST_LOG, cutoff), workspace_id)
+        ingestion_batch_events = self._filter_workspace(self._read_log(self.INGEST_BATCH_LOG, cutoff), workspace_id)
         evaluation_events = self._filter_workspace(self._read_log(self.EVAL_LOG, cutoff), workspace_id)
 
         def _latest_timestamp(events: list[dict]) -> Optional[str]:
@@ -331,6 +464,18 @@ class TelemetryService:
                 "count": len(ingestion_events),
                 "errors": sum(1 for e in ingestion_events if e.get("status") == "error"),
                 "latest_timestamp": _latest_timestamp(ingestion_events),
+            },
+            "ingestion_batches": {
+                "count": len(ingestion_batch_events),
+                "errors": sum(1 for e in ingestion_batch_events if e.get("status") not in {"success", "partial"}),
+                "latest_timestamp": _latest_timestamp(ingestion_batch_events),
+                "rss_peak_mb": max(
+                    (float(e.get("rss_peak_mb") or 0.0) for e in ingestion_batch_events),
+                    default=0.0,
+                ),
+                "latest_ingestion_id": (
+                    ingestion_batch_events[-1].get("ingestion_id") if ingestion_batch_events else None
+                ),
             },
             "evaluation": {
                 "count": len(evaluation_events),
@@ -853,6 +998,38 @@ class TelemetryService:
             "errors": errors,
         }
 
+    def _aggregate_ingestion_batches(self, events: list[dict]) -> dict:
+        """Aggregate per-batch ingestion progress metrics."""
+        if not events:
+            return {
+                "total_batches": 0,
+                "errors": 0,
+                "rss_peak_mb": 0.0,
+                "avg_duration_ms": 0.0,
+                "pages_processed": 0,
+                "chunks_created": 0,
+                "points_indexed": 0,
+                "latest_ingestion_id": None,
+                "latest_batch_index": None,
+            }
+
+        durations = [int(e.get("duration_ms") or 0) for e in events]
+        return {
+            "total_batches": len(events),
+            "errors": sum(1 for e in events if e.get("status") not in {"success", "partial"}),
+            "rss_peak_mb": max((float(e.get("rss_peak_mb") or 0.0) for e in events), default=0.0),
+            "avg_duration_ms": round(sum(durations) / len(durations), 1) if durations else 0.0,
+            "pages_processed": sum(
+                max(0, int(e.get("page_end") or 0) - int(e.get("page_start") or 0) + 1)
+                for e in events
+                if e.get("page_start") is not None and e.get("page_end") is not None
+            ),
+            "chunks_created": sum(int(e.get("chunks_created") or 0) for e in events),
+            "points_indexed": sum(int(e.get("points_indexed") or 0) for e in events),
+            "latest_ingestion_id": events[-1].get("ingestion_id"),
+            "latest_batch_index": events[-1].get("batch_index"),
+        }
+
     def _aggregate_answers(self, queries: list[dict], evaluations: list[dict]) -> dict:
         """Aggregate answer quality metrics."""
         if not queries and not evaluations:
@@ -994,6 +1171,33 @@ class TelemetryService:
         """Append a JSON event to a log file."""
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _hash_text(text: Optional[str]) -> str:
+        normalized = (text or "").strip().encode("utf-8")
+        return hashlib.sha256(b"clinical-planner-v1:" + normalized).hexdigest()
+
+    @classmethod
+    def _safe_variant_snapshot(cls, variant) -> dict:
+        variant_type = getattr(variant, "variant_type", None)
+        query = getattr(variant, "query", "")
+        purpose = getattr(variant, "purpose", None)
+        origin = getattr(variant, "origin", None)
+        if isinstance(variant, dict):
+            variant_type = variant.get("variant_type")
+            query = variant.get("query", "")
+            purpose = variant.get("purpose")
+            origin = variant.get("origin")
+        return {
+            "variant_type": variant_type,
+            "origin": origin,
+            "query_hash": cls._hash_text(query),
+            "query_length": len(query or ""),
+            "purpose": purpose,
+            "context_preserved": getattr(variant, "context_preserved", None) if not isinstance(variant, dict) else variant.get("context_preserved"),
+            "blocked": getattr(variant, "blocked", None) if not isinstance(variant, dict) else variant.get("blocked"),
+            "blocked_reason": getattr(variant, "blocked_reason", None) if not isinstance(variant, dict) else variant.get("blocked_reason"),
+        }
 
     @staticmethod
     def _read_log(log_path: Path, cutoff_ts: float) -> list[dict]:

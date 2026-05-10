@@ -2,6 +2,7 @@
 RAG API — FastAPI application for Phase 0 Foundation RAG
 """
 import json
+import hmac
 import os
 import sys
 from pathlib import Path
@@ -17,10 +18,11 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models.schemas import (
-    DocumentUploadResponse, DocumentMetadata,
+    DocumentUploadResponse, DocumentMetadata, DocumentIngestionJobListResponse,
     DocumentListResponse, QueryLogResponse,
     SearchRequest, SearchResponse,
     QueryRequest, QueryResponse,
+    ExternalChatRequest, ExternalChatResponse,
     EvaluationQuestion, Dataset,
     EnterpriseSession, EnterpriseTenant, EnterpriseTenantCreate, EnterpriseTenantUpdate,
     EnterpriseUserCreate, EnterpriseUserRecord, EnterpriseUserUpdate,
@@ -129,12 +131,35 @@ app.add_middleware(
     allow_origins=allowed_cors_origins,
     allow_credentials=CORS_ALLOW_CREDENTIALS,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID", "X-API-Key"],
 )
 
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "auditor": 2, "admin_rag": 3, "super_admin": 4, "admin": 4}
 SESSION_COOKIE_MAX_AGE = 60 * 60 * 8
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+UPLOAD_STREAM_CHUNK_BYTES = 1024 * 1024
+
+
+def _require_external_chat_api_key(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> None:
+    configured_key = os.getenv("EXTERNAL_CHAT_API_KEY", "").strip()
+    if not configured_key:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "external_chat_not_configured",
+                "message": "External chat API key is not configured.",
+            },
+        )
+    provided_key = (x_api_key or "").strip()
+    if not provided_key or not hmac.compare_digest(provided_key, configured_key):
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "invalid_api_key",
+                "message": "Valid X-API-Key header required.",
+            },
+        )
 
 
 def _resolve_session_token(authorization: str | None, session_cookie: str | None) -> str | None:
@@ -1337,27 +1362,51 @@ async def upload_document(
 
         file_path = upload_dir / file.filename
         try:
-            content = await file.read()
+            received_bytes = 0
+            with open(file_path, "wb") as output:
+                while True:
+                    chunk = await file.read(UPLOAD_STREAM_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    received_bytes += len(chunk)
+                    if received_bytes > MAX_UPLOAD_BYTES:
+                        try:
+                            file_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        max_mb = round(MAX_UPLOAD_BYTES / 1024 / 1024, 1)
+                        received_mb = round(received_bytes / 1024 / 1024, 1)
+                        _log_ingestion_failure(
+                            workspace_id=workspace_id,
+                            filename=file.filename or "unknown",
+                            source_type=suffix.lstrip(".") or "unknown",
+                            error="file_too_large",
+                        )
+                        raise HTTPException(
+                            status_code=413,
+                            detail={
+                                "error": "file_too_large",
+                                "message": f"Arquivo excede limite de {max_mb}MB",
+                                "received_mb": received_mb,
+                                "max_mb": max_mb,
+                            }
+                        )
+                    output.write(chunk)
 
-            # Limit: 50MB
-            if len(content) > 50 * 1024 * 1024:
+            if received_bytes == 0:
                 _log_ingestion_failure(
                     workspace_id=workspace_id,
                     filename=file.filename or "unknown",
                     source_type=suffix.lstrip(".") or "unknown",
-                    error="file_too_large",
+                    error="empty_file",
                 )
                 raise HTTPException(
                     status_code=400,
                     detail={
-                        "error": "file_too_large",
-                        "message": "Arquivo excede limite de 50MB",
-                        "received_mb": round(len(content) / 1024 / 1024, 1),
-                        "max_mb": 50
+                        "error": "empty_file",
+                        "message": "Arquivo enviado esta vazio",
                     }
                 )
-
-            file_path.write_bytes(content)
         except HTTPException:
             raise
         except Exception as e:
@@ -1369,8 +1418,60 @@ async def upload_document(
             )
             raise HTTPException(status_code=500, detail={"error": "upload_failed", "message": str(e)})
 
-        # Ingest
+        # Ingest or queue heavy PDF work for an isolated worker.
+        queued_for_worker = False
         try:
+            from services.ingestion_job_service import (
+                create_ingestion_job,
+                IngestionPreflightError,
+                preflight_large_ingestion,
+                should_queue_pdf_upload,
+                spawn_ingestion_worker,
+                update_ingestion_job,
+            )
+
+            if should_queue_pdf_upload(file_path, received_bytes):
+                preflight = preflight_large_ingestion(
+                    source_path=file_path,
+                    workspace_id=workspace_id,
+                    received_bytes=received_bytes,
+                )
+                job = create_ingestion_job(
+                    source_path=file_path,
+                    workspace_id=workspace_id,
+                    filename=file.filename or file_path.name,
+                    source_type=suffix.lstrip(".") or "unknown",
+                    chunking_strategy=chunking_strategy,
+                    file_size_bytes=received_bytes,
+                    preflight=preflight,
+                )
+                try:
+                    spawn_ingestion_worker(job["ingestion_id"])
+                except Exception as e:
+                    update_ingestion_job(
+                        job["ingestion_id"],
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        error_code="worker_spawn_failed",
+                        error_message=str(e),
+                    )
+                    raise
+                queued_for_worker = True
+                return DocumentUploadResponse(
+                    document_id=job["document_id"],
+                    status="queued",
+                    catalog_scope="operational",
+                    source_type=job["source_type"],
+                    filename=job["filename"],
+                    page_count=None,
+                    char_count=0,
+                    chunk_count=0,
+                    created_at=job["created_at"],
+                    chunking_strategy=chunking_strategy,
+                    ingestion_id=job["ingestion_id"],
+                    message="Upload recebido; indexacao em processamento isolado.",
+                )
+
             result = ingest_document(
                 file_path, workspace_id, file.filename,
                 chunking_strategy=chunking_strategy,
@@ -1384,6 +1485,17 @@ async def upload_document(
                 error=f"parse_failed:{e}",
             )
             raise HTTPException(status_code=413, detail={"error": "parse_failed", "message": str(e)})
+        except IngestionPreflightError as e:
+            _log_ingestion_failure(
+                workspace_id=workspace_id,
+                filename=file.filename or "unknown",
+                source_type=suffix.lstrip(".") or "unknown",
+                error=f"preflight_failed:{e.error_code}",
+            )
+            raise HTTPException(
+                status_code=e.status_code,
+                detail={"error": e.error_code, "message": e.message, **e.details},
+            )
         except Exception as e:
             _log_ingestion_failure(
                 workspace_id=workspace_id,
@@ -1394,13 +1506,54 @@ async def upload_document(
             raise HTTPException(status_code=500, detail={"error": "internal_error", "message": str(e)})
         finally:
             # Clean up uploaded file
-            try:
-                file_path.unlink()
-            except Exception:
-                pass
+            if not queued_for_worker:
+                try:
+                    file_path.unlink()
+                except Exception:
+                    pass
 
 
 # ─── Document Metadata ────────────────────────────────────────
+
+
+@app.get("/documents/ingestion-jobs", response_model=DocumentIngestionJobListResponse)
+def list_ingestion_job_statuses(
+    workspace_id: str = Query(default="default"),
+    limit: int = Query(default=10, ge=1, le=50),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """Return recent asynchronous ingestion jobs for a workspace."""
+    from services.ingestion_job_service import list_ingestion_jobs
+
+    _require_permission(_session, "documents.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
+    _require_workspace_access(workspace_id, _session)
+    jobs = list_ingestion_jobs(workspace_id=workspace_id, limit=limit)
+    return DocumentIngestionJobListResponse(
+        items=jobs,
+        total=len(jobs),
+        limit=limit,
+        workspace_id=workspace_id,
+    )
+
+
+@app.get("/documents/ingestion-jobs/{ingestion_id}")
+def get_ingestion_job_status(
+    ingestion_id: str,
+    workspace_id: str = Query(default="default"),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """Return persisted status for an asynchronous ingestion job."""
+    from services.ingestion_job_service import get_ingestion_job_status
+
+    _require_permission(_session, "documents.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
+    _require_workspace_access(workspace_id, _session)
+    job = get_ingestion_job_status(ingestion_id)
+    if job is None or job.get("workspace_id") != workspace_id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "ingestion_job_not_found", "message": "Job de indexacao nao encontrado."},
+        )
+    return job
 
 
 @app.get("/documents/{document_id}", response_model=DocumentMetadata)
@@ -1502,6 +1655,62 @@ def query(request: QueryRequest, _session: EnterpriseSession = Depends(_enterpri
             return result
         except Exception as e:
             raise HTTPException(status_code=500, detail={"error": "query_error", "message": str(e)})
+
+
+@app.post("/external/chat", response_model=ExternalChatResponse)
+def external_chat(
+    request: ExternalChatRequest,
+    _api_key: None = Depends(_require_external_chat_api_key),
+):
+    """
+    External integration endpoint for server-to-server clinical chat access.
+
+    Authentication is handled only by X-API-Key. The route always uses the
+    validated clinical_v2 chat pipeline and does not expose retrieval debug.
+    """
+    from services.search_service import search_and_answer
+
+    query_request = QueryRequest(
+        query=request.question,
+        workspace_id=request.workspace_id,
+        top_k=request.top_k,
+        threshold=request.threshold,
+        retrieval_profile="clinical_v2",
+        query_expansion_mode="off",
+        query_expansion=False,
+        reranking=False,
+        reranking_method="none",
+    )
+    with traced_span(
+        "external.chat",
+        kind=SpanKind.INTERNAL,
+        attributes={
+            "query": request.question[:120],
+            "top_k": request.top_k,
+            "threshold": request.threshold,
+            "retrieval_profile": "clinical_v2",
+        },
+        workspace_id=request.workspace_id,
+    ):
+        try:
+            result = search_and_answer(query_request)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "external_chat_error", "message": str(e)})
+
+    return ExternalChatResponse(
+        answer=result.answer_markdown or result.answer,
+        confidence=result.confidence,
+        grounded=result.grounded,
+        low_confidence=result.low_confidence,
+        citation_coverage=result.citation_coverage,
+        citations=result.citations,
+        bibliography=result.bibliography,
+        chunks_used=result.chunks_used,
+        retrieval_profile="clinical_v2",
+        latency_ms=result.latency_ms,
+        completeness_status=result.completeness_status,
+        missing_sections=result.missing_sections,
+    )
 
 
 # ─── Evaluation Dataset ───────────────────────────────────────

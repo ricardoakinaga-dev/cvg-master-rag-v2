@@ -235,7 +235,7 @@ curl -X POST "http://localhost:8000/search" \
     "query": "Qual o prazo para reembolso?",
     "workspace_id": "default",
     "top_k": 5,
-    "threshold": 0.70
+    "threshold": 0.25
   }'
 ```
 
@@ -251,7 +251,7 @@ curl -X POST "http://localhost:8000/query" \
     "query": "Qual o prazo para reembolso?",
     "workspace_id": "default",
     "top_k": 5,
-    "threshold": 0.70
+    "threshold": 0.25
   }'
 ```
 
@@ -337,7 +337,9 @@ curl -X POST "http://localhost:8000/evaluation/dataset?workspace_id=default" \
 | `CHUNK_SIZE` | 1200 | Tamanho do chunk |
 | `CHUNK_OVERLAP` | 240 | Overlap entre chunks |
 | `DEFAULT_TOP_K` | 5 | Número de resultados |
-| `DEFAULT_THRESHOLD` | 0.70 | Threshold mínimo de score |
+| `DEFAULT_THRESHOLD` | 0.25 | Threshold mínimo de score normalizado |
+| `RERANKING_ENABLED` | true | Ativa reranking local BM25F por padrão |
+| `RERANKING_METHOD` | bm25f | Método padrão de reranking |
 | `LLM_MODEL` | gpt-4o-mini | Modelo para respostas |
 
 ---

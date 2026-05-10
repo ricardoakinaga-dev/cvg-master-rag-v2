@@ -8,7 +8,6 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-import pdfplumber
 from docx import Document as DocxDocument
 
 from models.schemas import NormalizedDocument, DocumentMetadata
@@ -46,7 +45,9 @@ def parse_document(
     ext = file_path.suffix.lower()
 
     if ext == ".pdf":
-        return _parse_pdf(file_path, workspace_id)
+        raise ParseError(
+            "PDF deve usar o pipeline controlado de ingestao, nao o parser legado all-in-memory."
+        )
     elif ext == ".docx":
         return _parse_docx(file_path, workspace_id)
     elif ext == ".md":
@@ -58,55 +59,10 @@ def parse_document(
 
 
 def _parse_pdf(file_path: Path, workspace_id: str):
-    """Extract text from PDF using pdfplumber."""
-    pages = []
-    total_chars = 0
-
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            page_count = len(pdf.pages)
-            for i, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                pages.append({
-                    "page_number": i + 1,
-                    "text": text
-                })
-                total_chars += len(text)
-    except Exception as e:
-        raise ParseError(f"Falha ao extrair texto do PDF: {e}")
-
-    if total_chars == 0:
-        raise ParseError("PDF não contém texto extraível (pode ser escaneado).")
-
-    doc_id = str(uuid.uuid4())
-    raw_json_path = str(file_path.parent / f"{doc_id}_raw.json")
-
-    normalized = NormalizedDocument(
-        document_id=doc_id,
-        source_type="pdf",
-        filename=file_path.name,
-        workspace_id=workspace_id,
-        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        pages=pages,
-        sections=[],
-        metadata={"page_count": len(pages)},
-        raw_json_path=raw_json_path
+    """PDF parsing is intentionally disabled in this legacy parser."""
+    raise ParseError(
+        "PDF deve usar o pipeline controlado de ingestao, nao o parser legado all-in-memory."
     )
-
-    metadata = DocumentMetadata(
-        document_id=doc_id,
-        workspace_id=workspace_id,
-        source_type="pdf",
-        filename=file_path.name,
-        page_count=len(pages),
-        char_count=total_chars,
-        chunk_count=0,
-        status="parsed",
-        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        chunking_strategy="recursive"
-    )
-
-    return normalized, metadata
 
 
 def _parse_docx(file_path: Path, workspace_id: str):

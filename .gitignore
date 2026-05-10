@@ -28,11 +28,13 @@ frontend/tsconfig.tsbuildinfo
 # Local tool state
 .claude/
 .codex
+.runtime/
 
 # Runtime logs and generated data
 data/
 data/logs/*.jsonl
 src/logs/*.jsonl
+src/logs/*.log
 !src/logs/.gitkeep
 src/data/
 src/data/documents/

@@ -11,7 +11,7 @@ import { Badge, Button, Card, EmptyState, ErrorState, Input, Select, Skeleton, T
 import { loadStoredJson, saveStoredJson } from "@/lib/storage";
 import type { DocumentListItem, RetrievalProfile, SearchResponse, SearchResultItem } from "@/types";
 
-const STORAGE_KEY = "frontend.search.state";
+const STORAGE_KEY = "frontend.search.state.v2";
 
 type SearchFormState = {
   query: string;
@@ -30,7 +30,7 @@ const DEFAULT_STATE: SearchFormState = {
   query: "",
   workspaceId: "default",
   topK: 5,
-  threshold: 0.7,
+  threshold: 0.25,
   retrievalProfile: "",
   sourceType: "",
   documentId: "",
@@ -215,7 +215,7 @@ export default function SearchPage() {
                 min={0}
                 max={1}
                 value={form.threshold}
-                onChange={(event) => setForm((current) => ({ ...current, threshold: Number(event.target.value) || 0.7 }))}
+                onChange={(event) => setForm((current) => ({ ...current, threshold: Number(event.target.value) || 0.25 }))}
               />
             </label>
             <label className="ui-label">

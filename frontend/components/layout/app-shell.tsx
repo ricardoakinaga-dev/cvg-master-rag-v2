@@ -37,7 +37,7 @@ function AppShellFrame({ children }: { children: ReactNode }) {
     let active = true;
     setError(null);
     api
-      .health(activeWorkspaceId)
+      .health(activeWorkspaceId, { light: true })
       .then((value) => {
         if (active) {
           setHealth(value);

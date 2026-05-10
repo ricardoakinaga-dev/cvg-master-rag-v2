@@ -17,6 +17,7 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
+    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@/*": [
@@ -35,9 +36,9 @@
   "include": [
     "**/*.ts",
     "**/*.tsx",
-    ".next-playwright/types/**/*.ts",
+    ".next/types/**/*.ts",
     "next-env.d.ts",
-    ".next/types/**/*.ts"
+    ".next-playwright/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"

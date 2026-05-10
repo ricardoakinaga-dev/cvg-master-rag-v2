@@ -925,6 +925,50 @@ select {
   border-color: rgba(139, 211, 255, 0.22);
 }
 
+.job-list {
+  display: grid;
+  gap: 12px;
+}
+
+.job-row {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.job-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.job-progress-track {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.job-progress-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--success));
+}
+
+.job-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .mono {
   font-family: "SFMono-Regular", "Menlo", "Monaco", "Consolas", monospace;
   font-size: 0.88rem;
@@ -940,9 +984,57 @@ pre.mono {
   white-space: pre-wrap;
 }
 
+.clinical-answer {
+  display: grid;
+  gap: 14px;
+}
+
+.professor-answer {
+  line-height: 1.68;
+}
+
+.professor-answer > p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.answer-list {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.clinical-note,
+.clinical-section {
+  padding: 12px 0;
+  border-top: 1px solid var(--surface-border);
+}
+
+.clinical-note p,
+.clinical-section p {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+
+.clinical-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.clinical-footer {
+  border-radius: 8px;
+}
+
 @media (max-width: 1280px) {
   .grid.cols-4 {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .job-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .split {
@@ -1015,5 +1107,14 @@ pre.mono {
 
   .auth-page {
     padding: 16px;
+  }
+
+  .job-row-main {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .job-grid {
+    grid-template-columns: 1fr;
   }
 }

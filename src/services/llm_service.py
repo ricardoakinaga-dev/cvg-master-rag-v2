@@ -17,8 +17,10 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
 SYSTEM_PROMPT = """Você é um assistente de IA que responde perguntas
 usando SOMENTE o contexto fornecido abaixo.
 
-Se a informação do contexto não for suficiente para
-responder, diga "Não sei" — não invente resposta.
+Se o contexto cobrir apenas parte da pergunta, responda somente essa parte
+e deixe claro que os trechos não trazem um protocolo completo.
+Só diga "Não sei" quando os trechos não trouxerem nenhum fato útil
+para a pergunta.
 Responda em português."""
 
 USER_PROMPT_TEMPLATE = """Contexto:

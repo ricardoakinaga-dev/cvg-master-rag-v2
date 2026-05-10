@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { api, ApiError } from "@/lib/api";
 import { loadStoredJson, saveStoredJson } from "@/lib/storage";
 import { ROUTE_META } from "@/lib/navigation";
-import { formatDateTime, formatNumber, truncate } from "@/lib/utils";
+import { formatDateTime, formatNumber, humanFileSize, truncate } from "@/lib/utils";
 import { PageHeader } from "@/components/layout/page-header";
 import { useEnterpriseSession } from "@/components/layout/enterprise-session-provider";
 import {
@@ -21,7 +21,7 @@ import {
   Table,
   useToast,
 } from "@/components/ui";
-import type { DocumentListItem, DocumentListResponse, DocumentMetadata } from "@/types";
+import type { DocumentIngestionJobStatus, DocumentListItem, DocumentListResponse, DocumentMetadata } from "@/types";
 import { Upload, RefreshCcw, ChevronLeft, ChevronRight, FileUp } from "lucide-react";
 
 type Filters = {
@@ -37,12 +37,14 @@ type UploadFeedback = {
   description: string;
 };
 
+const ACTIVE_JOB_STATUSES = new Set<DocumentIngestionJobStatus["status"]>(["pending", "processing"]);
 const FILTERS_STORAGE_KEY = "frontend.documents.filters";
 
 export default function DocumentsPage() {
   const { pushToast } = useToast();
   const { session } = useEnterpriseSession();
   const activeWorkspaceId = session?.active_tenant.workspace_id ?? "default";
+  const previousJobStatuses = useRef<Record<string, DocumentIngestionJobStatus["status"]>>({});
   const [filters, setFilters] = useState<Filters>({ workspace_id: activeWorkspaceId, query: "", source_type: "", status: "" });
   const [appliedFilters, setAppliedFilters] = useState<Filters>(filters);
   const [page, setPage] = useState(0);
@@ -59,6 +61,9 @@ export default function DocumentsPage() {
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploadFeedback, setUploadFeedback] = useState<UploadFeedback | null>(null);
+  const [ingestionJobs, setIngestionJobs] = useState<DocumentIngestionJobStatus[]>([]);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [jobsLastUpdatedAt, setJobsLastUpdatedAt] = useState<string | null>(null);
 
   useEffect(() => {
     const stored = loadStoredJson<Filters>(FILTERS_STORAGE_KEY, {
@@ -79,6 +84,57 @@ export default function DocumentsPage() {
   useEffect(() => {
     saveStoredJson(FILTERS_STORAGE_KEY, filters);
   }, [filters]);
+
+  const refreshIngestionJobs = useCallback(async () => {
+    try {
+      const response = await api.documents.listIngestionJobs(activeWorkspaceId, 6);
+      setIngestionJobs(response.items);
+      setJobsError(null);
+      setJobsLastUpdatedAt(new Date().toISOString());
+    } catch (err: unknown) {
+      const detail = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Falha ao carregar jobs";
+      setJobsError(`Atualização atrasada: ${detail}`);
+    }
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadJobs() {
+      try {
+        const response = await api.documents.listIngestionJobs(activeWorkspaceId, 6);
+        if (!active) return;
+        setIngestionJobs(response.items);
+        setJobsError(null);
+        setJobsLastUpdatedAt(new Date().toISOString());
+      } catch (err: unknown) {
+        if (!active) return;
+        const detail = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Falha ao carregar jobs";
+        setJobsError(`Atualização atrasada: ${detail}`);
+      }
+    }
+
+    void loadJobs();
+    const interval = window.setInterval(loadJobs, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    const previous = previousJobStatuses.current;
+    const finishedNow = ingestionJobs.some((job) => {
+      const priorStatus = previous[job.ingestion_id];
+      return priorStatus && ACTIVE_JOB_STATUSES.has(priorStatus) && !ACTIVE_JOB_STATUSES.has(job.status);
+    });
+    previousJobStatuses.current = Object.fromEntries(
+      ingestionJobs.map((job) => [job.ingestion_id, job.status]),
+    );
+    if (finishedNow) {
+      setPage(0);
+      setAppliedFilters((current) => ({ ...current }));
+    }
+  }, [ingestionJobs]);
 
   useEffect(() => {
     let active = true;
@@ -155,20 +211,26 @@ export default function DocumentsPage() {
     try {
       const workspaceId = activeWorkspaceId;
       const uploadedFileName = file.name;
-      await api.documents.upload(file, workspaceId);
-      const description = `${uploadedFileName} foi incorporado ao corpus de ${workspaceId}.`;
+      const result = await api.documents.upload(file, workspaceId);
+      const queued = result.status === "queued";
+      const description = queued
+        ? `${uploadedFileName} foi recebido e a indexação segue em worker isolado.`
+        : `${uploadedFileName} foi incorporado ao corpus de ${workspaceId}.`;
       setUploadFeedback({
         intent: "success",
-        title: "Documento enviado",
+        title: queued ? "Indexação em fila" : "Documento enviado",
         description,
       });
       setShowUpload(false);
       setFile(null);
       pushToast({
-        title: "Upload concluído",
+        title: queued ? "Upload recebido" : "Upload concluído",
         description,
         intent: "success",
       });
+      if (queued) {
+        void refreshIngestionJobs();
+      }
       setPage(0);
       setAppliedFilters({ ...filters, workspace_id: workspaceId });
     } catch (err) {
@@ -198,6 +260,37 @@ export default function DocumentsPage() {
     setDragging(false);
     const dropped = event.dataTransfer.files?.[0];
     if (dropped) setFile(dropped);
+  }
+
+  function jobBadgeVariant(status: DocumentIngestionJobStatus["status"]) {
+    if (status === "committed") return "success";
+    if (status === "failed" || status === "aborted") return "danger";
+    if (status === "processing") return "info";
+    return "warning";
+  }
+
+  function operationalBadgeVariant(status?: DocumentIngestionJobStatus["operational_status"] | null) {
+    if (status === "completed") return "success";
+    if (status === "failed" || status === "stalled") return "danger";
+    if (status === "warning") return "warning";
+    if (status === "running") return "info";
+    return "neutral";
+  }
+
+  function jobProgress(job: DocumentIngestionJobStatus) {
+    if (!job.page_count) return null;
+    return Math.min(100, Math.max(0, Math.round((job.pages_processed / job.page_count) * 100)));
+  }
+
+  function formatRate(value?: number | null, label = "min") {
+    if (value === null || value === undefined || Number.isNaN(value)) return "taxa —";
+    return `${formatNumber(Math.round(value))}/${label}`;
+  }
+
+  function formatStaleness(seconds?: number | null) {
+    if (seconds === null || seconds === undefined) return "lote —";
+    if (seconds < 60) return `${formatNumber(seconds)}s sem lote`;
+    return `${formatNumber(Math.floor(seconds / 60))}min sem lote`;
   }
 
   const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
@@ -334,6 +427,61 @@ export default function DocumentsPage() {
           <Badge variant={uploadFeedback.intent === "success" ? "success" : "danger"}>
             {uploadFeedback.intent === "success" ? "status ok" : "verificar"}
           </Badge>
+        </Card>
+      ) : null}
+
+      {ingestionJobs.length || jobsError ? (
+        <Card className="card-inner">
+          <div className="card-title">
+            <strong>Indexações</strong>
+            <span>{jobsError ?? `${formatNumber(ingestionJobs.length)} jobs recentes`}</span>
+          </div>
+          {jobsError ? (
+            <div className="state-box">
+              <h3>Status temporariamente atrasado</h3>
+              <p>{jobsError}</p>
+              {jobsLastUpdatedAt ? <p>Última atualização válida: {formatDateTime(jobsLastUpdatedAt)}</p> : null}
+            </div>
+          ) : null}
+          {ingestionJobs.length ? (
+            <div className="job-list">
+              {ingestionJobs.map((job) => {
+                const progress = jobProgress(job);
+                const primaryAlert = job.operational_alerts?.[0];
+                return (
+                  <div className="job-row" key={job.ingestion_id}>
+                    <div className="job-row-main">
+                      <div>
+                        <strong>{job.filename}</strong>
+                        <div className="thin mono">{truncate(job.ingestion_id, 24)}</div>
+                      </div>
+                      <div className="page-actions">
+                        <Badge variant={jobBadgeVariant(job.status)}>{job.status}</Badge>
+                        <Badge variant={operationalBadgeVariant(job.operational_status)}>{job.operational_status ?? "status —"}</Badge>
+                      </div>
+                    </div>
+                    <div className="job-progress-track" aria-label={`Progresso de ${job.filename}`}>
+                      <div className="job-progress-fill" style={{ width: `${progress ?? 0}%` }} />
+                    </div>
+                    <div className="job-grid">
+                      <span>{formatNumber(job.pages_processed)} / {formatNumber(job.page_count)} páginas</span>
+                      <span>{formatNumber(job.chunks_written)} chunks</span>
+                      <span>{formatNumber(job.qdrant_points_written)} pontos</span>
+                      <span>{job.rss_peak_mb ? `${formatNumber(Math.round(job.rss_peak_mb))} MB RSS` : "RSS —"}</span>
+                      <span>{job.file_size_bytes ? humanFileSize(job.file_size_bytes) : "tamanho —"}</span>
+                      <span>{job.resource_isolation_mode ?? "isolamento —"}</span>
+                      <span>{formatRate(job.pages_per_minute, "min")} páginas</span>
+                      <span>{formatRate(job.chunks_per_minute, "min")} chunks</span>
+                      <span>{formatStaleness(job.seconds_since_last_batch)}</span>
+                      <span>heartbeat {formatDateTime(job.last_heartbeat_at)}</span>
+                    </div>
+                    {primaryAlert ? <div className="thin">{primaryAlert.code}: {primaryAlert.message}</div> : null}
+                    {job.error_message ? <div className="thin">{job.error_code}: {job.error_message}</div> : null}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
         </Card>
       ) : null}
 

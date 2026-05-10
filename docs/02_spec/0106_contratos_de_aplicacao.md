@@ -164,7 +164,7 @@
     "query": str,
     "workspace_id": str,
     "top_k": int | 5,
-    "threshold": float | 0.70,
+    "threshold": float | 0.25,
     "filters": {
         "document_id": UUID | None,
         "source_type": str | None,
@@ -197,7 +197,7 @@
     "query": str,
     "workspace_id": str,
     "top_k": int | 5,
-    "threshold": float | 0.70,
+    "threshold": float | 0.25,
     "model": str | "gpt-4o-mini"
 }
 ```

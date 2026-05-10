@@ -17,17 +17,78 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import FieldCondition, Filter, MatchValue
 from core.config import (
     QDRANT_COLLECTION,
-    DOCUMENTS_DIR,
+    QDRANT_CHECK_COMPATIBILITY,
     QDRANT_HOST,
     QDRANT_PORT,
-    QDRANT_CHECK_COMPATIBILITY,
+    DOCUMENTS_DIR,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
 )
 from services.embedding_service import get_embeddings_batch
 from services.chunker import recursive_chunk
-from models.schemas import NormalizedDocument
+from services.chunk_io import iter_json_array_batches
+from models.schemas import Chunk, NormalizedDocument
 from scripts.corpus_utils import canonical_document_ids
+
+
+REINDEX_INDEX_BATCH_SIZE = max(1, int(os.getenv("INGESTION_INDEX_BATCH_SIZE", "32")))
+
+
+def _create_reindex_qdrant_client(timeout: float | None = None) -> QdrantClient:
+    """Create a Qdrant client while preserving monkeypatchable script tests."""
+    client_kwargs = {"host": QDRANT_HOST, "port": QDRANT_PORT}
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+    if QDRANT_CHECK_COMPATIBILITY:
+        try:
+            return QdrantClient(**client_kwargs, check_compatibility=True)
+        except TypeError as exc:
+            if "check_compatibility" not in str(exc):
+                raise
+    return QdrantClient(**client_kwargs)
+
+
+def _embed_and_index_chunk_batches(chunks: list[Chunk], workspace_id: str) -> int:
+    """Generate embeddings and index chunks in bounded batches."""
+    from services.vector_service import index_chunks
+
+    indexed = 0
+    for start in range(0, len(chunks), REINDEX_INDEX_BATCH_SIZE):
+        chunk_batch = chunks[start:start + REINDEX_INDEX_BATCH_SIZE]
+        texts = [chunk.text for chunk in chunk_batch]
+        embeddings = get_embeddings_batch(texts)
+        if len(embeddings) != len(chunk_batch):
+            raise RuntimeError(
+                f"embedding count mismatch: {len(embeddings)} != {len(chunk_batch)}"
+            )
+        index_chunks(chunk_batch, embeddings, workspace_id)
+        indexed += len(chunk_batch)
+    return indexed
+
+
+def _embed_and_index_persisted_chunk_file(chunks_file: Path, workspace_id: str) -> int:
+    """Stream a persisted chunks JSON file and index it in bounded batches."""
+    from services.vector_service import index_chunks
+
+    indexed = 0
+    for chunk_dicts in iter_json_array_batches(chunks_file, REINDEX_INDEX_BATCH_SIZE):
+        chunk_batch = [Chunk(**item) for item in chunk_dicts]
+        texts = [chunk.text for chunk in chunk_batch]
+        embeddings = get_embeddings_batch(texts)
+        if len(embeddings) != len(chunk_batch):
+            raise RuntimeError(
+                f"embedding count mismatch: {len(embeddings)} != {len(chunk_batch)}"
+            )
+        index_chunks(chunk_batch, embeddings, workspace_id)
+        indexed += len(chunk_batch)
+    return indexed
+
+
+def _count_persisted_chunks(chunks_file: Path) -> int:
+    total = 0
+    for batch in iter_json_array_batches(chunks_file, REINDEX_INDEX_BATCH_SIZE):
+        total += len(batch)
+    return total
 
 
 def full_reindex(
@@ -43,11 +104,7 @@ def full_reindex(
         client = None
     else:
         try:
-            client = QdrantClient(
-                host=QDRANT_HOST,
-                port=QDRANT_PORT,
-                check_compatibility=QDRANT_CHECK_COMPATIBILITY,
-            )
+            client = _create_reindex_qdrant_client(timeout=None)
             qdrant_available = True
         except Exception as e:
             client = None
@@ -127,39 +184,46 @@ def full_reindex(
 
         normalized = NormalizedDocument(**raw_data)
 
-        # Re-chunk
-        chunks = recursive_chunk(
-            normalized,
-            chunk_size=CHUNK_SIZE,
-            overlap=CHUNK_OVERLAP,
-            workspace_id=workspace_id
-        )
-        print(f"  Chunks: {len(chunks)}")
+        pdf_uses_persisted_chunks = normalized.source_type == "pdf"
+        if pdf_uses_persisted_chunks:
+            if not chunks_file.exists():
+                print(f"  WARN: PDF without persisted chunks, skipping unsafe raw re-chunk: {doc_id}")
+                continue
+            try:
+                chunk_count = _count_persisted_chunks(chunks_file)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+                print(f"  WARN: failed to load persisted PDF chunks for {doc_id}: {e}")
+                continue
+            print("  PDF: using persisted chunks instead of raw page re-chunk")
+        else:
+            # Re-chunk
+            chunks = recursive_chunk(
+                normalized,
+                chunk_size=CHUNK_SIZE,
+                overlap=CHUNK_OVERLAP,
+                workspace_id=workspace_id
+            )
+            chunk_count = len(chunks)
+        print(f"  Chunks: {chunk_count}")
 
         # Save chunks (with correct offsets)
-        if chunks_file.exists():
-            chunks_file.unlink()
-        with open(chunks_file, "w", encoding="utf-8") as f:
-            json.dump([c.model_dump() for c in chunks], f, ensure_ascii=False)
-        print(f"  Chunks saved to {chunks_file.name}")
+        if not pdf_uses_persisted_chunks:
+            if chunks_file.exists():
+                chunks_file.unlink()
+            with open(chunks_file, "w", encoding="utf-8") as f:
+                json.dump([c.model_dump() for c in chunks], f, ensure_ascii=False)
+            print(f"  Chunks saved to {chunks_file.name}")
 
         if not qdrant_available:
             continue
 
-        texts = [c.text for c in chunks]
         try:
-            embeddings = get_embeddings_batch(texts)
-            if len(embeddings) != len(chunks):
-                print(
-                    f"  WARN: embedding count mismatch for {doc_id}: "
-                    f"{len(embeddings)} != {len(chunks)}"
-                )
-                continue
-
-            from services.vector_service import index_chunks
-            index_chunks(chunks, embeddings, workspace_id)
-            total_points += len(chunks)
-            print(f"  Indexed {len(chunks)} points")
+            if pdf_uses_persisted_chunks:
+                indexed_count = _embed_and_index_persisted_chunk_file(chunks_file, workspace_id)
+            else:
+                indexed_count = _embed_and_index_chunk_batches(chunks, workspace_id)
+            total_points += indexed_count
+            print(f"  Indexed {indexed_count} points")
         except Exception as e:
             qdrant_available = False
             print(f"  WARN: index failed for {doc_id}: {e}")

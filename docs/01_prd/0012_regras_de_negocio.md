@@ -24,7 +24,7 @@
 
 ### RN-05: Retrieval
 - Busca híbrida usa dense + sparse + RRF
-- Threshold default: 0.70
+- Threshold default operacional: 0.25 para score normalizado de retrieval
 - Top-k default: 5
 
 ### RN-06: Low Confidence

@@ -2,6 +2,105 @@
 
 ---
 
+## CICLO ATUAL - RETRIEVAL CHAT QUALITY (2026-05-01)
+
+Status atual: **READY_FOR_NEXT_STEP** — codigo, configuracao, restart e validacao publica final concluidos.
+
+Fonte executiva:
+- `docs/03_build/0310_RETRIEVAL_CHAT_QUALITY_FIX.md`
+
+Objetivo: melhorar a qualidade de busca e chat para corpus veterinario bilingue, evitando abstencao indevida em consultas portuguesas sobre conteudo indexado em ingles.
+
+Regra de execucao: cada task deve marcar `Executado: [x]`, registrar evidencia e atualizar `docs/99_runtime_state.md` e `docs/20_master_execution_log.md` antes da proxima task.
+
+Itens ativos:
+
+| ID | Prioridade | Titulo | Status |
+|---|---|---|---|
+| RQ-001 | P0 | Reproduzir falha com consultas reais em portugues | DONE |
+| RQ-002 | P0 | Confirmar corpus e collection Qdrant efetiva | DONE |
+| RQ-003 | P0 | Ampliar ponte terminologica portugues-ingles | DONE |
+| RQ-004 | P0 | Aplicar ponte no caminho comum de busca | DONE |
+| RQ-005 | P0 | Ajustar threshold operacional para score normalizado | DONE |
+| RQ-006 | P0 | Ativar reranking BM25F por padrao | DONE |
+| RQ-007 | P1 | Versionar defaults persistidos do frontend | DONE |
+| RQ-008 | P1 | Atualizar documentacao e registrar evidencias | DONE |
+| RQ-009 | P0 | Reiniciar servicos e validar DNS publico | DONE |
+
+---
+
+## CICLO PROPOSTO - INDEXING 400MB CONTROLLED RELEASE (2026-05-01)
+
+Status atual: **COMPLETED** — ciclo 400MB aprovado para liberacao permanente controlada: canarios `100MiB`, `250MiB`, arquivo real de aproximadamente `250MB`, canario final `391,5MiB` (`410.562.000 bytes`), heartbeat/status leve, gatilhos futuros de shards JSONL e auditoria final sem gaps criticos/importantes.
+
+Fonte executiva:
+- `docs/INDEXING_400MB_CONTROLLED_INGESTION_ANALYSIS.md`
+- `docs/02_spec/0122_indexing_400mb_controlled_release_spec.md`
+- `docs/03_build/0305_ROADMAP_INDEXING_400MB_CONTROLLED_RELEASE.md`
+- `docs/03_build/0306_BACKLOG_INDEXING_400MB_CONTROLLED_RELEASE.md`
+- `docs/03_build/INDEXING_400MB_SPRINTS/`
+
+Objetivo: liberar indexacao sob demanda do arquivo alvo de `410.562.000 bytes` (`391,54 MiB`) usando limite seguro `MAX_UPLOAD_BYTES=524288000` (`500 MiB`), com preflight, concorrencia controlada, timeout, cgroup e canarios progressivos.
+
+Regra de execucao: cada task do ciclo I400 deve marcar `Executado: [x]`, registrar evidencia e atualizar `docs/99_runtime_state.md` e `docs/20_master_execution_log.md` antes da proxima task.
+
+Itens ativos:
+
+| ID | Prioridade | Titulo | Status |
+|---|---|---|---|
+| I400-001 | P0 | Definir limite seguro de upload 500MiB | DONE |
+| I400-002 | P0 | Implementar preflight de disco/capacidade | DONE |
+| I400-003 | P0 | Limitar concorrencia de jobs grandes a 1 | DONE |
+| I400-004 | P0 | Configurar timeout finito para job grande | DONE |
+| I400-005 | P0 | Executar worker com systemd/cgroup | DONE |
+| I400-006 | P1 | Registrar perfil e modo de isolamento no job | DONE |
+| I400-007 | P1 | Testar fallback/abort por limite de memoria | DONE |
+| I400-008 | P0 | Canary 100MB | DONE |
+| I400-009 | P0 | Canary 250MB | DONE |
+| I400-009R | P0 | Canary real aproximadamente 250MB | DONE |
+| I400-010 | P0 | Canary arquivo real 391,5MiB | DONE |
+| I400-011 | P1 | Adicionar heartbeat e alertas operacionais | DONE |
+| I400-012 | P2 | Definir gatilho de shards JSONL futuro | DONE |
+
+---
+
+## CICLO PROPOSTO - INDEXING MEMORY RESILIENCE (2026-04-30)
+
+Status atual: **WAITING_HUMAN_APPROVAL** — canario de upload grande passou via endpoint real; limite foi restaurado para `MAX_UPLOAD_BYTES=26214400` e aguarda decisao sobre promocao permanente para `52428800`.
+
+Fonte executiva:
+- `docs/INDEXING_MEMORY_REMEDIATION_PLAN.md`
+- `docs/02_spec/0121_indexing_memory_resilience_spec.md`
+- `docs/03_build/0303_ROADMAP_INDEXING_MEMORY_RESILIENCE.md`
+- `docs/03_build/0304_BACKLOG_INDEXING_MEMORY_RESILIENCE.md`
+- `docs/03_build/INDEXING_MEMORY_SPRINTS/`
+
+Objetivo: remediar travamentos/OOM na indexacao de livros PDF grandes, reconciliar estado parcial em disco/Qdrant e tornar upload/reindexacao seguros por lotes, worker isolado, commit atomico e cleanup.
+
+Regra de execucao: cada task do ciclo IMR deve marcar `Executado: [x]` no sprint correspondente, registrar evidencia e atualizar `docs/99_runtime_state.md` e `docs/20_master_execution_log.md` antes da proxima task.
+
+Itens ativos:
+
+| ID | Prioridade | Titulo | Status |
+|---|---|---|---|
+| IMR-001 | P0 | Bloquear nova indexacao grande ate reconciliacao | DONE |
+| IMR-002 | P0 | Limpar artefatos parciais e pontos orfaos | DONE |
+| IMR-003 | P0 | Definir limites temporarios conservadores | DONE |
+| IMR-004 | P0 | Criar extracao PDF por pagina/lote com liberacao de cache | DONE |
+| IMR-005 | P0 | Medir memoria por pagina/lote | DONE |
+| IMR-006 | P0 | Transformar upload pesado em job | DONE |
+| IMR-007 | P0 | Criar worker isolado com limite de memoria | DONE |
+| IMR-008 | P1 | Remover caminho PDF inseguro do parser antigo | DONE |
+| IMR-009 | P1 | Unificar PDF operacional, canonico e reindex | DONE |
+| IMR-010 | P1 | Tornar reindex_corpus batch-safe | DONE |
+| IMR-011 | P1 | Tornar reindex_document batch-safe | DONE |
+| IMR-012 | P0 | Implementar arquivos temporarios e commit atomico | DONE |
+| IMR-013 | P0 | Implementar cleanup por ingestion_id | DONE |
+| IMR-014 | P1 | Expor logs/metricas por lote | DONE |
+| IMR-015 | P0 | Validar com livro real e falha simulada | DONE |
+
+---
+
 ## CICLO ATUAL - FECHAMENTO 98-100 (2026-04-28)
 
 Status final: **COMPLETED** em 2026-04-30, score final `100/100`.
@@ -279,6 +378,23 @@ Itens ativos:
 - **fase:** Future
 - **risco:** Médio
 - **impacto:** Médio
+
+---
+
+## BACKLOG PRIORITARIO - VETERINARY CLINICAL CHAT RAG v2
+
+| Prioridade | ID | Titulo | Fonte | Status |
+|---|---|---|---|---|
+| P0 | VCHAT-001..003 | Contrato clinico estruturado e rodape bibliografico | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-004..006 | Eval set clinico inicial e baseline | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-007..012 | Planner clinico multilíngue, traducao contextual e preservacao de escopo | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-013..021 | Fan-out PT/EN, reranking clinico e evidence pack por secao | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-022..027 | Resposta professoral e rodape `Referencias bibliograficas` | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-028..033 | Grounding por secao, guardrails de escopo e reducao segura | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P1 | VCHAT-034..042 | API retrocompativel, frontend clinico, observabilidade e release gate | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | PENDING |
+| P0 | VCHAT-HF-003 | Hotfix qualidade resposta gastroenterite: evidencia fraca/OCR cru/secoes planejadas | `docs/03_build/0308_BACKLOG_VETERINARY_CLINICAL_CHAT_RAG.md` | COMPLETED |
+
+Regra especifica: nenhuma task VCHAT pode ser considerada pronta sem atualizar documentacao e log antes da proxima task.
 
 ---
 

@@ -123,7 +123,7 @@
     "query": "Qual o prazo para reembolso?",
     "workspace_id": "workspace_001",
     "top_k": 5,
-    "threshold": 0.70,
+    "threshold": 0.25,
     "filters": {
         "document_id": "uuid",
         "source_type": "pdf",
@@ -158,7 +158,7 @@
     "query": "Qual o prazo para reembolso?",
     "workspace_id": "workspace_001",
     "top_k": 5,
-    "threshold": 0.70,
+    "threshold": 0.25,
     "model": "gpt-4o-mini"
 }
 ```

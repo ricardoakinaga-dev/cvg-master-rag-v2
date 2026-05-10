@@ -24,7 +24,6 @@ import socket
 from unittest.mock import patch, MagicMock
 
 import pytest
-from qdrant_client import QdrantClient
 
 from models.schemas import Dataset, SearchRequest, QueryRequest, EvaluationQuestion, SearchResultItem, SearchResponse
 from core.config import (
@@ -32,8 +31,8 @@ from core.config import (
     DOCUMENTS_DIR,
     QDRANT_HOST,
     QDRANT_PORT,
-    QDRANT_CHECK_COMPATIBILITY,
 )
+from services.vector_service import create_qdrant_client
 from services.telemetry_service import TelemetryService
 from services.admin_service import reset_admin_state
 
@@ -119,11 +118,7 @@ def corpus_doc_ids():
     if not _can_reach_qdrant_host():
         pytest.skip("Qdrant host port not reachable from sandbox")
 
-    client = QdrantClient(
-        host=QDRANT_HOST,
-        port=QDRANT_PORT,
-        check_compatibility=QDRANT_CHECK_COMPATIBILITY,
-    )
+    client = create_qdrant_client(timeout=None)
     try:
         result = client.scroll(collection_name='rag_phase0', limit=100, with_vectors=False)
     except Exception:
@@ -146,11 +141,7 @@ def qdrant_client_for_tests():
     """Ensure Qdrant is reachable, otherwise skip integration checks."""
     if not _can_reach_qdrant_host():
         pytest.skip("Qdrant host port not reachable from sandbox")
-    client = QdrantClient(
-        host=QDRANT_HOST,
-        port=QDRANT_PORT,
-        check_compatibility=QDRANT_CHECK_COMPATIBILITY,
-    )
+    client = create_qdrant_client(timeout=None)
     try:
         client.get_collections()
     except Exception:
@@ -198,6 +189,3197 @@ class TestDatasetValidation:
             if q.get("documento_nome")
         }
         assert question_filenames == covered_documents
+
+    def test_clinical_eval_dataset_loads_without_llm(self):
+        from models.schemas import ClinicalEvaluationDataset
+
+        dataset_path = Path("docs/03_build/VCHAT_EVALS/clinical_eval_v1.json")
+        raw = json.loads(dataset_path.read_text(encoding="utf-8"))
+        dataset = ClinicalEvaluationDataset(**raw)
+
+        assert dataset.dataset_id == "veterinary_clinical_chat_v1"
+        assert dataset.target_language == "pt-BR"
+        assert len(dataset.questions) == 7
+        assert {question.id for question in dataset.questions} == {
+            "vchat-gastroenterite-cao-001",
+            "vchat-hepatopatia-cao-001",
+            "vchat-convulsao-cao-001",
+            "vchat-drc-gato-001",
+            "vchat-pancreatite-cao-001",
+            "vchat-piometra-cadela-001",
+            "vchat-obstrucao-uretral-gato-001",
+        }
+
+    def test_clinical_eval_dataset_declares_required_sections_and_terms(self):
+        from models.schemas import ClinicalEvaluationDataset
+
+        dataset_path = Path("docs/03_build/VCHAT_EVALS/clinical_eval_v1.json")
+        dataset = ClinicalEvaluationDataset(**json.loads(dataset_path.read_text(encoding="utf-8")))
+
+        required_problems = {
+            "gastroenterite aguda",
+            "hepatopatia",
+            "convulsao",
+            "doenca renal cronica",
+            "pancreatite",
+            "piometra",
+            "obstrucao uretral",
+        }
+
+        assert {question.clinical_problem for question in dataset.questions} == required_problems
+        for question in dataset.questions:
+            assert "referencias" in question.expected_sections
+            assert question.required_evidence
+            assert question.required_terms_pt
+            assert question.required_terms_en
+            assert question.workspace_id == "default"
+
+    def test_clinical_expected_fixtures_load_without_llm(self):
+        from models.schemas import ClinicalExpectedFixtureSet
+
+        fixture_path = Path("docs/03_build/VCHAT_EVALS/clinical_eval_expected_v1.json")
+        raw = json.loads(fixture_path.read_text(encoding="utf-8"))
+        fixtures = ClinicalExpectedFixtureSet(**raw)
+
+        assert fixtures.fixture_id == "veterinary_clinical_chat_expected_v1"
+        assert fixtures.dataset_id == "veterinary_clinical_chat_v1"
+        assert len(fixtures.fixtures) == 7
+
+    def test_clinical_expected_fixtures_match_eval_dataset_questions(self):
+        from models.schemas import ClinicalEvaluationDataset, ClinicalExpectedFixtureSet
+
+        dataset = ClinicalEvaluationDataset(
+            **json.loads(Path("docs/03_build/VCHAT_EVALS/clinical_eval_v1.json").read_text(encoding="utf-8"))
+        )
+        fixtures = ClinicalExpectedFixtureSet(
+            **json.loads(Path("docs/03_build/VCHAT_EVALS/clinical_eval_expected_v1.json").read_text(encoding="utf-8"))
+        )
+
+        questions_by_id = {question.id: question for question in dataset.questions}
+        fixtures_by_id = {fixture.question_id: fixture for fixture in fixtures.fixtures}
+
+        assert set(fixtures_by_id) == set(questions_by_id)
+        for question_id, fixture in fixtures_by_id.items():
+            question = questions_by_id[question_id]
+            assert set(fixture.required_sections).issubset(set(question.expected_sections))
+            assert fixture.allowed_missing_sections == question.allowed_missing_sections
+            assert fixture.min_bibliography_references >= 1
+            assert fixture.required_footer_heading == "## Referencias bibliograficas"
+            assert {"document_filename", "page", "chunk_id", "sections"}.issubset(
+                set(fixture.required_reference_fields)
+            )
+            assert {
+                "scope_preserved",
+                "translation_context_preserved",
+                "bibliographic_grounding",
+                "unsupported_claims",
+            }.issubset(set(fixture.required_guardrails))
+
+    def test_clinical_baseline_contract_detects_current_chat_missing_v2_fields(self):
+        from models.schemas import ClinicalExpectedFixture, QueryResponse
+        from scripts.clinical_eval_baseline import evaluate_response_contract
+
+        fixture = ClinicalExpectedFixture(
+            question_id="q1",
+            required_sections=["resumo", "tratamento_clinico", "referencias"],
+            min_bibliography_references=1,
+            required_reference_fields=["document_filename", "page", "chunk_id", "sections"],
+            required_guardrails=[
+                "scope_preserved",
+                "translation_context_preserved",
+                "bibliographic_grounding",
+                "unsupported_claims",
+            ],
+            forbidden_response_patterns=["nao sei"],
+        )
+        response = QueryResponse(
+            answer="Nao sei.",
+            chunks_used=[],
+            citations=[],
+            confidence="low",
+            grounded=False,
+            citation_coverage=0.0,
+            low_confidence=True,
+            retrieval={},
+            latency_ms=1,
+        )
+
+        result = evaluate_response_contract(response, fixture)
+
+        assert result["passed"] is False
+        assert "missing_section:resumo" in result["failures"]
+        assert "bibliography_footer:missing" in result["failures"]
+        assert "bibliography:min_references" in result["failures"]
+        assert "guardrail:scope_preserved:missing" in result["failures"]
+        assert "low_confidence:true" in result["failures"]
+
+    def test_clinical_query_planner_fallback_creates_plan_without_answering_user(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        plan, latency = plan_clinical_query(
+            "Explique uma conduta para hepatopatia em cao com suspeita de hepatite cronica.",
+            use_llm=False,
+        )
+
+        assert latency >= 0
+        assert plan.answers_user is False
+        assert plan.generated_by == "deterministic_fallback"
+        assert plan.original_query.startswith("Explique uma conduta")
+        assert plan.species == "cao"
+        assert plan.clinical_problem == "hepatopatia"
+        assert plan.organ_system == "hepatobiliar"
+        assert "liver disease" in plan.canonical_terms_en
+        assert plan.query_variants[0].variant_type == "original"
+        assert plan.query_variants[0].query == plan.original_query
+
+    def test_clinical_query_planner_llm_uses_json_temperature_zero_and_preserves_original(self, monkeypatch):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        payload = {
+            "original_query": "alterada indevidamente",
+            "detected_language": "pt-BR",
+            "species": "cao",
+            "clinical_problem": "convulsao",
+            "organ_system": "neurologico",
+            "intent": "tratamento",
+            "canonical_terms_pt": ["convulsao", "diazepam"],
+            "canonical_terms_en": ["seizure", "diazepam"],
+            "synonyms": ["status epilepticus"],
+            "required_terms": ["cao", "convulsao"],
+            "low_signal_terms": ["manejo"],
+            "desired_sections": ["resumo", "tratamento_clinico", "referencias"],
+            "query_variants": [
+                {"variant_type": "technical_en", "query": "dog seizure diazepam", "purpose": "english retrieval"}
+            ],
+            "scope_warning": None,
+            "planner_notes": "nao responder ao usuario",
+            "answers_user": True,
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+        create_mock = MagicMock(return_value=fake_response)
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            create_mock,
+        )
+
+        query = "Quais sao os passos iniciais para manejo de convulsao em cao?"
+        plan, _ = plan_clinical_query(query, use_llm=True)
+
+        call_kwargs = create_mock.call_args.kwargs
+        assert call_kwargs["temperature"] == 0
+        assert call_kwargs["response_format"] == {"type": "json_object"}
+        assert "NÃO responda" in call_kwargs["messages"][0]["content"]
+        assert plan.generated_by == "llm"
+        assert plan.answers_user is False
+        assert plan.original_query == query
+        assert plan.query_variants[0].variant_type == "original"
+        assert plan.query_variants[0].query == query
+
+    def test_clinical_query_planner_rejects_invalid_llm_payload_and_falls_back(self, monkeypatch):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        invalid_payload = {
+            "original_query": "Hepatopatia em cao",
+            "detected_language": "pt-BR",
+            "answers_user": False,
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(invalid_payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        plan, _ = plan_clinical_query("Como conduzir hepatopatia em cao?", use_llm=True)
+
+        assert plan.generated_by == "deterministic_fallback"
+        assert plan.species == "cao"
+        assert plan.clinical_problem == "hepatopatia"
+        assert plan.answers_user is False
+
+    def test_clinical_query_plan_validation_rejects_ambiguous_plan_without_warning(self):
+        from models.schemas import ClinicalQueryPlan, ClinicalQueryVariant
+        from services.clinical_query_planner_service import (
+            ClinicalQueryPlanValidationError,
+            validate_clinical_query_plan,
+        )
+
+        plan = ClinicalQueryPlan(
+            original_query="O que fazer neste caso?",
+            desired_sections=["resumo"],
+            query_variants=[
+                ClinicalQueryVariant(
+                    variant_type="original",
+                    query="O que fazer neste caso?",
+                    purpose="preservar a frase original",
+                    origin="user_original",
+                )
+            ],
+            answers_user=False,
+        )
+
+        with pytest.raises(ClinicalQueryPlanValidationError, match="scope_warning_required"):
+            validate_clinical_query_plan(plan, "O que fazer neste caso?")
+
+        plan.scope_warning = "Pergunta ambigua: especie ou problema clinico incompleto."
+        assert validate_clinical_query_plan(plan, "O que fazer neste caso?") is plan
+
+    def test_clinical_query_planner_logs_safe_auditable_plan(self, tmp_path, monkeypatch):
+        from services.clinical_query_planner_service import plan_clinical_query
+        import services.telemetry_service as telemetry_module
+
+        class FakeTelemetry(TelemetryService):
+            def _ensure_logs(self):
+                pass
+
+        fake = FakeTelemetry()
+        fake.CLINICAL_PLANNER_LOG = tmp_path / "clinical_planner.jsonl"
+        monkeypatch.setattr(telemetry_module, "_telemetry", fake)
+
+        query = "Como conduzir hepatopatia em cao do tutor Ricardo?"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        events = [
+            json.loads(line)
+            for line in fake.CLINICAL_PLANNER_LOG.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        assert events
+        event = events[-1]
+        assert event["type"] == "clinical_query_plan"
+        assert event["generated_by"] == "deterministic_fallback"
+        assert event["detected_language"] == "pt-BR"
+        assert event["species"] == "cao"
+        assert event["clinical_problem"] == "hepatopatia"
+        assert event["query_hash"]
+        assert event["query_length"] == len(query)
+        assert "query" not in event
+        assert "Ricardo" not in json.dumps(event, ensure_ascii=False)
+        assert event["variant_count"] == len(plan.query_variants)
+        assert event["variant_types"][0] == "original"
+        assert event["variant_hashes"]
+        assert all("query" not in variant for variant in event["variants"])
+
+    def test_clinical_query_fanout_generates_structured_variants_with_origin_and_purpose(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        query = "Qual protocolo para pancreatite em cao com vomito?"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        assert list(variants_by_type) == ["original", "technical_pt", "technical_en", "synonyms"]
+        assert variants_by_type["original"].query == query
+        assert variants_by_type["original"].origin == "user_original"
+        assert variants_by_type["technical_pt"].origin == "planner_terms_pt"
+        assert variants_by_type["technical_en"].origin == "planner_terms_en"
+        assert variants_by_type["synonyms"].origin == "planner_synonyms"
+        assert all(variant.purpose for variant in plan.query_variants)
+        assert len({variant.query for variant in plan.query_variants}) == len(plan.query_variants)
+
+    def test_clinical_query_fanout_completes_llm_variants_without_replacing_original(self, monkeypatch):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        payload = {
+            "original_query": "alterada indevidamente",
+            "detected_language": "pt-BR",
+            "species": "gato",
+            "clinical_problem": "obstrucao uretral",
+            "organ_system": "urinario",
+            "intent": "protocolo",
+            "canonical_terms_pt": ["obstrucao uretral", "hipercalemia"],
+            "canonical_terms_en": ["urethral obstruction", "hyperkalemia"],
+            "synonyms": ["feline urethral obstruction", "blocked cat"],
+            "required_terms": ["gato", "obstrucao uretral"],
+            "low_signal_terms": ["protocolo"],
+            "desired_sections": ["resumo", "exames_complementares", "tratamento_clinico", "referencias"],
+            "query_variants": [
+                {"variant_type": "technical_en", "query": "cat urethral obstruction hyperkalemia"}
+            ],
+            "scope_warning": None,
+            "planner_notes": "fanout",
+            "answers_user": False,
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        query = "Quais prioridades na obstrucao uretral em gato?"
+        plan, _ = plan_clinical_query(query, use_llm=True)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        assert variants_by_type["original"].query == query
+        assert variants_by_type["original"].origin == "user_original"
+        assert variants_by_type["technical_pt"].origin == "planner_terms_pt"
+        assert variants_by_type["technical_en"].origin == "planner_terms_en"
+        assert variants_by_type["synonyms"].origin == "planner_synonyms"
+        assert len({variant.query for variant in plan.query_variants}) == len(plan.query_variants)
+
+    def test_translation_context_guardrail_preserves_species_problem_intent_and_severity(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        query = "Qual protocolo inicial para pancreatite aguda grave em cao?"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        english_variant = variants_by_type["technical_en"]
+        normalized_en = english_variant.query.lower()
+        assert english_variant.context_preserved is True
+        assert english_variant.blocked is False
+        assert english_variant.blocked_reason is None
+        assert "dog" in normalized_en
+        assert "pancreatitis" in normalized_en
+        assert "protocol" in normalized_en
+        assert "initial" in normalized_en
+        assert "acute" in normalized_en
+        assert "severe" in normalized_en
+
+    def test_clinical_query_planner_recognizes_hypertrophic_cardiomyopathy(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        query = "me de um protocolo para cardiomiopatia hipertrofica em cao"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        assert plan.species == "cao"
+        assert plan.clinical_problem == "cardiomiopatia hipertrofica"
+        assert plan.organ_system == "cardiovascular"
+        assert "cardiomiopatia hipertrofica" in plan.canonical_terms_pt
+        assert "hypertrophic cardiomyopathy" in plan.canonical_terms_en
+        assert "hypertrophic cardiomyopathy" in variants_by_type["technical_en"].query.lower()
+
+    def test_clinical_query_planner_recognizes_traumatic_brain_injury(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        query = "me de um protocolo para trauma cranio encefalico"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        assert plan.clinical_problem == "trauma cranioencefalico"
+        assert plan.organ_system == "neurologico"
+        assert plan.intent == "protocolo"
+        assert "trauma cranioencefalico" in plan.canonical_terms_pt
+        assert "traumatic brain injury" in plan.canonical_terms_en
+        assert "intracranial pressure" in plan.canonical_terms_en
+        assert "traumatic brain injury" in variants_by_type["technical_en"].query.lower()
+
+    def test_clinical_query_planner_recognizes_linear_foreign_body_in_cats(self):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        query = "me de um protocolo de corpo estranho linear em gatos"
+        plan, _ = plan_clinical_query(query, use_llm=False)
+
+        variants_by_type = {variant.variant_type: variant for variant in plan.query_variants}
+        assert plan.species == "gato"
+        assert plan.clinical_problem == "corpo estranho linear"
+        assert plan.organ_system == "gastrointestinal"
+        assert plan.intent == "protocolo"
+        assert "corpo estranho linear" in plan.canonical_terms_pt
+        assert "linear foreign body" in plan.canonical_terms_en
+        assert "gastrointestinal foreign body" in plan.canonical_terms_en
+        assert "intestinal obstruction" in plan.canonical_terms_en
+        assert "string foreign body" in plan.synonyms
+        assert "enterotomy" in plan.canonical_terms_en
+        assert "gastrotomy" in plan.canonical_terms_en
+        assert "peritonitis" in plan.canonical_terms_en
+        assert "linear foreign body" in variants_by_type["technical_en"].query.lower()
+
+    def test_clinical_retrieval_query_preparation_translates_portuguese_to_english(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "linear foreign body in cats clinical protocol gastrointestinal obstruction",
+            "species": "gato",
+            "clinical_problem": "corpo estranho linear",
+            "intent": "protocolo",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+        create_mock = MagicMock(return_value=fake_response)
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            create_mock,
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "me de um protocolo de corpo estranho linear em gatos",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["translated"] is True
+        assert prepared["detected_language"] == "pt-BR"
+        assert prepared["retrieval_query"] == payload["retrieval_query"]
+        assert prepared["species"] == "gato"
+        assert prepared["clinical_problem"] == "corpo estranho linear"
+        assert create_mock.call_args.kwargs["temperature"] == 0.2
+        assert create_mock.call_args.kwargs["response_format"] == {"type": "json_object"}
+
+    def test_clinical_retrieval_query_preparation_forces_english_when_preprocessor_input_is_ptbr(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "canonical_question_ptbr": "Qual é o protocolo para corpo estranho linear em gatos?",
+            "primary_focus": "corpo estranho linear em gatos",
+            "intent": "protocolo",
+            "expects_numeric": False,
+            "drug": {"name_pt": None, "name_en": None, "synonyms": []},
+            "must_include_terms": ["corpo estranho linear", "gatos"],
+            "exclude_terms": [],
+            "clarify_questions": [],
+            "query_lang": "pt-BR",
+            "query_en": None,
+            "input": "Qual é o protocolo para manejo de corpo estranho linear em gatos?",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "me de um protocolo de corpo estranho linear em gatos",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["retrieval_query"] != payload["input"]
+        assert "linear foreign body" in prepared["retrieval_query"]
+        assert "cat" in prepared["retrieval_query"] or "feline" in prepared["retrieval_query"]
+        assert "corpo estranho" not in prepared["retrieval_query"].lower()
+
+    def test_clinical_retrieval_query_preparation_blocks_species_problem_or_intent_drift(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "canine pancreatitis treatment protocol",
+            "species": "cao",
+            "clinical_problem": "pancreatite",
+            "intent": "tratamento",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "me de um protocolo de corpo estranho linear em gatos",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is True
+        assert prepared["retrieval_query"] is None
+        assert prepared["blocked_reason"] == "translation_species_conflict"
+
+    def test_clinical_retrieval_query_preparation_accepts_generic_problem_label_when_query_preserves_terms(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "linear foreign body in cats clinical protocol intestinal obstruction enterotomy",
+            "species": "cat",
+            "clinical_problem": "foreign body",
+            "intent": "protocol",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "me de um protocolo de corpo estranho linear em gatos",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["clinical_problem"] == "corpo estranho linear"
+        assert prepared["species"] == "gato"
+        assert prepared["intent"] == "protocolo"
+
+    def test_clinical_retrieval_query_preparation_allows_management_intent_variation_for_retrieval(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "linear foreign body in cats clinical management intestinal obstruction",
+            "species": "feline",
+            "clinical_problem": "linear foreign body",
+            "intent": "treatment",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "qual conduta para corpo estranho linear felino",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["intent"] == "tratamento"
+
+    def test_clinical_retrieval_query_preparation_allows_explanatory_intent_to_use_diagnostic_retrieval(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "intestinal obstruction in cats diagnostic clinical overview",
+            "species": "cat",
+            "clinical_problem": "intestinal obstruction",
+            "intent": "diagnosis",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "explique obstrucao intestinal em gatos",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["intent"] == "diagnostico"
+
+    def test_clinical_retrieval_query_preparation_does_not_block_intent_label_when_problem_terms_are_preserved(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "linear foreign body in cats clinical diagnosis intestinal obstruction",
+            "species": "cat",
+            "clinical_problem": "linear foreign body",
+            "intent": "diagnosis",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query(
+            "qual conduta para corpo estranho linear felino",
+            use_llm=True,
+        )
+
+        assert prepared["blocked"] is False
+        assert prepared["clinical_problem"] == "corpo estranho linear"
+
+    def test_clinical_retrieval_query_preparation_blocks_missing_clinical_problem_for_portuguese(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        payload = {
+            "retrieval_query": "feline clinical protocol",
+            "species": "gato",
+            "intent": "protocolo",
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        prepared = prepare_clinical_retrieval_query("qual protocolo em gatos?", use_llm=True)
+
+        assert prepared["blocked"] is True
+        assert prepared["blocked_reason"] == "translation_missing_clinical_problem"
+        assert prepared["retrieval_query"] is None
+
+    def test_clinical_retrieval_query_preparation_keeps_english_without_llm(self, monkeypatch):
+        from services.clinical_query_planner_service import prepare_clinical_retrieval_query
+
+        create_mock = MagicMock()
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            create_mock,
+        )
+
+        query = "linear foreign body in cats clinical protocol"
+        prepared = prepare_clinical_retrieval_query(query, use_llm=True)
+
+        assert prepared["blocked"] is False
+        assert prepared["translated"] is False
+        assert prepared["detected_language"] == "en"
+        assert prepared["retrieval_query"] == query
+        create_mock.assert_not_called()
+
+    def test_translation_context_guardrail_blocks_altered_translation_variant(self):
+        from models.schemas import ClinicalQueryPlan, ClinicalQueryVariant
+        from services.clinical_query_planner_service import validate_translation_context_preserved
+
+        plan = ClinicalQueryPlan(
+            original_query="Qual protocolo para pancreatite em cao?",
+            detected_language="pt-BR",
+            species="cao",
+            clinical_problem="pancreatite",
+            organ_system="gastrointestinal",
+            intent="protocolo",
+            canonical_terms_pt=["pancreatite"],
+            canonical_terms_en=["pancreatitis"],
+            synonyms=[],
+            required_terms=["cao", "pancreatite"],
+            desired_sections=["resumo", "tratamento_clinico", "referencias"],
+            query_variants=[
+                ClinicalQueryVariant(
+                    variant_type="original",
+                    query="Qual protocolo para pancreatite em cao?",
+                    purpose="preservar a frase original",
+                    origin="user_original",
+                ),
+                ClinicalQueryVariant(
+                    variant_type="technical_en",
+                    query="cat chronic kidney disease diagnostic tests",
+                    purpose="buscar em ingles",
+                    origin="planner_terms_en",
+                ),
+            ],
+        )
+
+        validated = validate_translation_context_preserved(plan)
+        english_variant = next(variant for variant in validated.query_variants if variant.variant_type == "technical_en")
+        assert english_variant.context_preserved is False
+        assert english_variant.blocked is True
+        assert "species_context_changed" in english_variant.blocked_reason
+        assert "clinical_problem_context_changed" in english_variant.blocked_reason
+        assert "intent_context_changed" in english_variant.blocked_reason
+
+    def test_fanout_scope_gate_rejects_blocked_variant_before_retrieval(self):
+        from models.schemas import ClinicalQueryPlan, ClinicalQueryVariant
+        from services.clinical_query_planner_service import (
+            ClinicalQueryPlanValidationError,
+            validate_fanout_scope_preserved,
+        )
+
+        plan = ClinicalQueryPlan(
+            original_query="Qual protocolo para pancreatite em cao?",
+            detected_language="pt-BR",
+            species="cao",
+            clinical_problem="pancreatite",
+            organ_system="gastrointestinal",
+            intent="protocolo",
+            canonical_terms_pt=["pancreatite"],
+            canonical_terms_en=["pancreatitis"],
+            synonyms=[],
+            required_terms=["cao", "pancreatite"],
+            desired_sections=["resumo", "tratamento_clinico", "referencias"],
+            query_variants=[
+                ClinicalQueryVariant(
+                    variant_type="original",
+                    query="Qual protocolo para pancreatite em cao?",
+                    purpose="preservar a frase original",
+                    origin="user_original",
+                ),
+                ClinicalQueryVariant(
+                    variant_type="technical_en",
+                    query="cat chronic kidney disease diagnostic tests",
+                    purpose="buscar em ingles",
+                    origin="planner_terms_en",
+                    context_preserved=False,
+                    blocked=True,
+                    blocked_reason="species_context_changed,clinical_problem_context_changed",
+                ),
+            ],
+        )
+
+        with pytest.raises(ClinicalQueryPlanValidationError, match="fanout_scope_changed"):
+            validate_fanout_scope_preserved(plan)
+
+    def test_fanout_scope_gate_falls_back_when_llm_changes_clinical_scope(self, monkeypatch):
+        from services.clinical_query_planner_service import plan_clinical_query
+
+        payload = {
+            "original_query": "Qual protocolo para pancreatite em cao?",
+            "detected_language": "pt-BR",
+            "species": "gato",
+            "clinical_problem": "doenca renal cronica",
+            "organ_system": "renal",
+            "intent": "diagnostico",
+            "canonical_terms_pt": ["doenca renal cronica", "creatinina"],
+            "canonical_terms_en": ["chronic kidney disease", "creatinine"],
+            "synonyms": ["CKD"],
+            "required_terms": ["gato", "doenca renal cronica"],
+            "low_signal_terms": ["protocolo"],
+            "desired_sections": ["resumo", "exames_complementares", "referencias"],
+            "query_variants": [],
+            "scope_warning": None,
+            "planner_notes": "alterou escopo",
+            "answers_user": False,
+        }
+        fake_response = MagicMock()
+        fake_response.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+
+        monkeypatch.setattr("services.clinical_query_planner_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_query_planner_service.llm_client.chat.completions.create",
+            MagicMock(return_value=fake_response),
+        )
+
+        plan, _ = plan_clinical_query("Qual protocolo para pancreatite em cao?", use_llm=True)
+
+        assert plan.generated_by == "deterministic_fallback"
+        assert plan.species == "cao"
+        assert plan.clinical_problem == "pancreatite"
+        assert all(variant.blocked is False for variant in plan.query_variants)
+
+    def test_clinical_fanout_retrieval_runs_all_variants_and_tracks_origin(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            variant_index = len(calls)
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id=f"chunk-{variant_index}",
+                        document_id="doc-vet",
+                        text=f"resultado {variant_index}",
+                        score=0.91 - (variant_index * 0.01),
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=10,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="Qual protocolo para pancreatite em cao?",
+                workspace_id="default",
+                top_k=3,
+                threshold=0.0,
+            ),
+            use_llm=False,
+        )
+
+        assert len(calls) == 4
+        assert len(response.results) == 4
+        assert response.method == "clinical_fanout"
+        assert response.total_candidates == 4
+        variants = [item.query_variant for item in response.results]
+        assert [variant["variant_type"] for variant in variants] == [
+            "original",
+            "technical_pt",
+            "technical_en",
+            "synonyms",
+        ]
+        assert variants[0]["origin"] == "user_original"
+        assert variants[2]["origin"] == "planner_terms_en"
+        assert all("query" not in variant for variant in variants)
+
+    def test_clinical_fanout_retrieval_skips_blocked_variants(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_plan_clinical_query(query, use_llm=True):
+            from models.schemas import ClinicalQueryPlan, ClinicalQueryVariant
+
+            return ClinicalQueryPlan(
+                original_query=query,
+                detected_language="pt-BR",
+                species="cao",
+                clinical_problem="pancreatite",
+                organ_system="gastrointestinal",
+                intent="protocolo",
+                canonical_terms_pt=["pancreatite"],
+                canonical_terms_en=["pancreatitis"],
+                required_terms=["cao", "pancreatite"],
+                desired_sections=["resumo", "referencias"],
+                query_variants=[
+                    ClinicalQueryVariant(
+                        variant_type="original",
+                        query=query,
+                        purpose="preservar original",
+                        origin="user_original",
+                    ),
+                    ClinicalQueryVariant(
+                        variant_type="technical_en",
+                        query="cat chronic kidney disease",
+                        purpose="buscar em ingles",
+                        origin="planner_terms_en",
+                        context_preserved=False,
+                        blocked=True,
+                        blocked_reason="species_context_changed",
+                    ),
+                ],
+            ), 0.01
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-original",
+                        document_id="doc-vet",
+                        text="resultado original",
+                        score=0.9,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=5,
+            )
+
+        monkeypatch.setattr("services.search_service.plan_clinical_query", fake_plan_clinical_query)
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="Qual protocolo para pancreatite em cao?", workspace_id="default"),
+            use_llm=False,
+        )
+
+        assert calls == ["Qual protocolo para pancreatite em cao?"]
+        assert len(response.results) == 1
+        assert response.results[0].query_variant["variant_type"] == "original"
+
+    def test_clinical_v2_retrieval_uses_translated_english_query_for_portuguese_input(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_prepare(query, use_llm=True):
+            return {
+                "original_query": query,
+                "retrieval_query": "linear foreign body in cats clinical protocol gastrointestinal obstruction",
+                "detected_language": "pt-BR",
+                "translated": True,
+                "generated_by": "llm_translation",
+                "blocked": False,
+                "blocked_reason": None,
+                "species": "gato",
+                "clinical_problem": "corpo estranho linear",
+                "intent": "protocolo",
+            }
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-linear-foreign-body",
+                        document_id="doc-surgery",
+                        text="Linear foreign body in cats causes intestinal obstruction and may require surgery.",
+                        score=0.91,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=3,
+            )
+
+        monkeypatch.setattr("services.search_service.prepare_clinical_retrieval_query", fake_prepare)
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="me de um protocolo de corpo estranho linear em gatos",
+                workspace_id="default",
+            ),
+            use_llm=True,
+        )
+
+        assert calls == ["linear foreign body in cats clinical protocol gastrointestinal obstruction"]
+        assert response.results
+        assert response.results[0].query_variant["variant_type"] == "technical_en"
+        assert response.results[0].query_variant["origin"] == "llm"
+        assert response.scores_breakdown["clinical_fanout"]["translation_applied"] is True
+
+    def test_clinical_v2_retrieval_keeps_english_input_without_translation(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_prepare(query, use_llm=True):
+            return {
+                "original_query": query,
+                "retrieval_query": query,
+                "detected_language": "en",
+                "translated": False,
+                "generated_by": "passthrough",
+                "blocked": False,
+                "blocked_reason": None,
+                "species": None,
+                "clinical_problem": None,
+                "intent": "unknown",
+            }
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-english",
+                        document_id="doc-surgery",
+                        text="Linear foreign body in cats.",
+                        score=0.91,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=3,
+            )
+
+        monkeypatch.setattr("services.search_service.prepare_clinical_retrieval_query", fake_prepare)
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        query = "linear foreign body in cats clinical protocol"
+        response = execute_clinical_fanout_search(
+            SearchRequest(query=query, workspace_id="default"),
+            use_llm=True,
+        )
+
+        assert calls == [query]
+        assert response.results
+        assert response.results[0].query_variant["variant_type"] == "original"
+        assert response.scores_breakdown["clinical_fanout"]["translation_applied"] is False
+
+    def test_clinical_v2_retrieval_blocks_portuguese_when_translation_fails(self, monkeypatch):
+        from models.schemas import SearchRequest
+        from services.search_service import execute_clinical_fanout_search
+
+        search_mock = MagicMock()
+
+        def fake_prepare(query, use_llm=True):
+            return {
+                "original_query": query,
+                "retrieval_query": None,
+                "detected_language": "pt-BR",
+                "translated": False,
+                "generated_by": "translation_unavailable",
+                "blocked": True,
+                "blocked_reason": "translation_unavailable",
+                "species": None,
+                "clinical_problem": None,
+                "intent": "unknown",
+            }
+
+        monkeypatch.setattr("services.search_service.prepare_clinical_retrieval_query", fake_prepare)
+        monkeypatch.setattr("services.search_service.search_hybrid", search_mock)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="me de um protocolo para pancreatite em cao", workspace_id="default"),
+            use_llm=True,
+        )
+
+        assert response.results == []
+        assert response.low_confidence is True
+        assert response.scores_breakdown["clinical_fanout"]["translation_blocked"] is True
+        search_mock.assert_not_called()
+
+    def test_clinical_v2_retrieval_blocks_portuguese_when_translation_missing_problem(self, monkeypatch):
+        from models.schemas import SearchRequest
+        from services.search_service import execute_clinical_fanout_search
+
+        search_mock = MagicMock()
+
+        def fake_prepare(query, use_llm=True):
+            return {
+                "original_query": query,
+                "retrieval_query": None,
+                "detected_language": "pt-BR",
+                "translated": True,
+                "generated_by": "llm_translation",
+                "blocked": True,
+                "blocked_reason": "translation_missing_clinical_problem",
+                "species": "gato",
+                "clinical_problem": None,
+                "intent": "protocolo",
+                "retrieval_query_hash": None,
+            }
+
+        monkeypatch.setattr("services.search_service.prepare_clinical_retrieval_query", fake_prepare)
+        monkeypatch.setattr("services.search_service.search_hybrid", search_mock)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="qual protocolo em gatos?", workspace_id="default"),
+            use_llm=True,
+        )
+
+        assert response.results == []
+        assert response.low_confidence is True
+        assert response.scores_breakdown["clinical_fanout"]["translation_blocked"] is True
+        assert response.scores_breakdown["clinical_fanout"]["translation_blocked_reason"] == "translation_missing_clinical_problem"
+        search_mock.assert_not_called()
+
+    def test_clinical_fanout_retrieval_merges_duplicate_chunks_preserving_best_score_and_origins(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        def fake_search_hybrid(request):
+            query = request.query.lower()
+            if "pancreatic inflammation" in query:
+                item = SearchResultItem(
+                    chunk_id="chunk-synonyms",
+                    document_id="doc-vet",
+                    text="resultado sinonimos",
+                    score=0.72,
+                    source="hybrid",
+                )
+            elif "pancreatitis" in query:
+                item = SearchResultItem(
+                    chunk_id="chunk-shared",
+                    document_id="doc-vet",
+                    text="resultado em ingles",
+                    score=0.96,
+                    source="hybrid",
+                )
+            elif "pancreatite" in query:
+                item = SearchResultItem(
+                    chunk_id="chunk-shared",
+                    document_id="doc-vet",
+                    text="resultado original",
+                    score=0.82,
+                    source="hybrid",
+                )
+            else:
+                item = SearchResultItem(
+                    chunk_id="chunk-other",
+                    document_id="doc-vet",
+                    text="resultado outro",
+                    score=0.72,
+                    source="hybrid",
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[item],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=3,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="Qual protocolo para pancreatite em cao?",
+                workspace_id="default",
+                top_k=4,
+                threshold=0.0,
+            ),
+            use_llm=False,
+        )
+
+        by_id = {item.chunk_id: item for item in response.results}
+        assert len(response.results) == 2
+        assert by_id["chunk-shared"].score == 0.96
+        assert by_id["chunk-shared"].text == "resultado em ingles"
+        assert by_id["chunk-shared"].query_variant["variant_type"] == "technical_en"
+        assert [origin["variant_type"] for origin in by_id["chunk-shared"].query_variants] == [
+            "original",
+            "technical_pt",
+            "technical_en",
+        ]
+        assert response.scores_breakdown["clinical_fanout"]["duplicate_chunk_count"] == 2
+
+    def test_clinical_fanout_debug_exposes_variant_diagnostics_without_query_text(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        def fake_search_hybrid(request):
+            variant_type = "technical_en" if "pancreatitis" in request.query.lower() else "original"
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id=f"chunk-{variant_type}",
+                        document_id="doc-vet",
+                        text="resultado",
+                        score=0.9,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        query = "Qual protocolo para pancreatite em cao do tutor Ricardo?"
+        response = execute_clinical_fanout_search(
+            SearchRequest(query=query, workspace_id="default", top_k=2, threshold=0.0),
+            use_llm=False,
+        )
+
+        debug = response.scores_breakdown["clinical_fanout_debug"]
+        assert debug["safe_for_admin_response"] is True
+        assert debug["variants"]
+        assert debug["chunks"]
+        assert all("query" not in variant for variant in debug["variants"])
+        assert all("query" not in chunk for chunk in debug["chunks"])
+        assert "Ricardo" not in json.dumps(debug, ensure_ascii=False)
+        first_chunk = debug["chunks"][0]
+        assert first_chunk["chunk_id"]
+        assert first_chunk["matched_variants"]
+        assert first_chunk["best_variant"]["variant_type"]
+        assert first_chunk["best_score"] >= 0
+
+    def test_clinical_candidate_classifier_assigns_expected_categories(self):
+        from services.search_service import classify_clinical_candidate
+
+        cases = [
+            (
+                "vomito, diarreia, dor abdominal e letargia sao sinais clinicos frequentes",
+                "sinais_sintomas",
+            ),
+            (
+                "hemograma, ureia, creatinina, ultrassom abdominal e radiografia podem ser indicados",
+                "exames_complementares",
+            ),
+            (
+                "tratamento com fluidoterapia, analgesia e antiemetico deve ser monitorado",
+                "tratamento_clinico",
+            ),
+            (
+                "a cirurgia com ovariohisterectomia e indicada nos casos de piometra",
+                "tratamento_cirurgico",
+            ),
+            (
+                "Ettinger textbook, bibliography, references and chapter citations",
+                "referencias",
+            ),
+        ]
+
+        for text, expected_category in cases:
+            classification = classify_clinical_candidate(text)
+            assert classification["primary_category"] == expected_category
+            assert expected_category in classification["categories"]
+            assert classification["matched_terms"]
+
+    def test_clinical_fanout_retrieval_adds_clinical_categories_to_candidates_and_debug(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        def fake_search_hybrid(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-exames",
+                        document_id="doc-vet",
+                        text="Hemograma, ureia, creatinina e ultrassom abdominal sao exames complementares.",
+                        score=0.94,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="Quais exames para pancreatite em cao?", workspace_id="default"),
+            use_llm=False,
+        )
+
+        assert response.results
+        assert response.results[0].primary_clinical_category == "exames_complementares"
+        assert "exames_complementares" in response.results[0].clinical_categories
+        debug_chunk = response.scores_breakdown["clinical_fanout_debug"]["chunks"][0]
+        assert debug_chunk["primary_clinical_category"] == "exames_complementares"
+        assert "exames_complementares" in debug_chunk["clinical_categories"]
+
+    def test_clinical_reranker_promotes_section_diversity_over_repeated_score_only_category(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            if len(calls) > 1:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[],
+                    total_candidates=0,
+                    low_confidence=True,
+                    retrieval_time_ms=1,
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-tratamento-1",
+                        document_id="doc-vet",
+                        text="tratamento com fluidoterapia analgesia e antiemetico",
+                        score=0.99,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-tratamento-2",
+                        document_id="doc-vet",
+                        text="tratamento clinico e terapia de suporte",
+                        score=0.98,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-exames",
+                        document_id="doc-vet",
+                        text="hemograma ureia creatinina ultrassom abdominal",
+                        score=0.74,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-sinais",
+                        document_id="doc-vet",
+                        text="vomito diarreia dor abdominal e letargia",
+                        score=0.71,
+                        source="hybrid",
+                    ),
+                ],
+                total_candidates=4,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="Qual protocolo para pancreatite em cao?", workspace_id="default", top_k=4),
+            use_llm=False,
+        )
+
+        ordered_ids = [item.chunk_id for item in response.results[:4]]
+        assert ordered_ids[:3] == ["chunk-sinais", "chunk-exames", "chunk-tratamento-1"]
+        assert ordered_ids.index("chunk-tratamento-2") > ordered_ids.index("chunk-tratamento-1")
+        rerank_debug = response.scores_breakdown["clinical_reranking"]
+        assert rerank_debug["applied"] is True
+        assert rerank_debug["diversity_categories"][:3] == [
+            "sinais_sintomas",
+            "exames_complementares",
+            "tratamento_clinico",
+        ]
+
+    def test_clinical_scope_filter_blocks_index_bibliography_only_and_different_subject_chunks(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            if len(calls) > 1:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[],
+                    total_candidates=0,
+                    low_confidence=True,
+                    retrieval_time_ms=1,
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-valid",
+                        document_id="doc-vet",
+                        text="pancreatite em cao com vomito, dor abdominal, ultrassom abdominal e fluidoterapia",
+                        score=0.91,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-index",
+                        document_id="doc-vet",
+                        text="Table of contents chapter 1 chapter 2 chapter 3 index list of figures",
+                        score=0.99,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-bibliography-only",
+                        document_id="doc-vet",
+                        text="References bibliography Smith 2019 Journal of Veterinary Internal Medicine doi isbn",
+                        score=0.97,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-other-subject",
+                        document_id="doc-vet",
+                        text="doenca renal cronica em gato creatinina ureia dieta renal",
+                        score=0.95,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-table",
+                        document_id="doc-vet",
+                        text=(
+                            "Common Causes of Shock Figure 6.1 80 15 60 10 40 5 20 0 0 20 "
+                            "40 60 80 cardiogenic failure hypertrophic cardiomyopathy"
+                        ),
+                        score=0.93,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-nonclinical",
+                        document_id="doc-fluxpay",
+                        document_filename="politicas_fluxpay.md",
+                        text="politica de reembolso fluxo de pagamento centro de custo nota fiscal",
+                        score=0.94,
+                        source="hybrid",
+                    ),
+                ],
+                total_candidates=6,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="Qual protocolo para pancreatite em cao?", workspace_id="default", top_k=4),
+            use_llm=False,
+        )
+
+        assert [item.chunk_id for item in response.results] == ["chunk-valid"]
+        scope_filter = response.scores_breakdown["clinical_scope_filter"]
+        assert scope_filter["removed_count"] == 5
+        assert scope_filter["kept_count"] == 1
+        removed_by_id = {item["chunk_id"]: item for item in scope_filter["removed_chunks"]}
+        assert removed_by_id["chunk-index"]["reason"] == "index_or_toc"
+        assert removed_by_id["chunk-bibliography-only"]["reason"] == "bibliography_only"
+        assert removed_by_id["chunk-other-subject"]["reason"] == "clinical_scope_mismatch"
+        assert removed_by_id["chunk-table"]["reason"] == "table_or_figure_only"
+        assert removed_by_id["chunk-nonclinical"]["reason"] == "nonclinical_domain"
+
+    def test_clinical_scope_filter_blocks_generic_semiology_for_hcm_query(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            if len(calls) > 1:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[],
+                    total_candidates=0,
+                    low_confidence=True,
+                    retrieval_time_ms=1,
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-generic-semiology",
+                        document_id="doc-semiology",
+                        document_filename="Semiologia Veterinaria Canary.pdf",
+                        text=(
+                            "Sempre e importante ressaltar que o exame fisico deve seguir uma sequencia "
+                            "de manobras, iniciando pela cabeca, pescoco, torax e abdome, avaliando "
+                            "narinas, mucosas, hidratacao, simetria e secrecoes sem definir cardiopatia."
+                        ),
+                        score=0.8,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-hcm",
+                        document_id="doc-cardio",
+                        document_filename="Ettinger.pdf",
+                        text=(
+                            "hypertrophic cardiomyopathy em caes pode cursar com sopro, arritmia, "
+                            "ecocardiografia e manejo cardiologico individualizado"
+                        ),
+                        score=0.7,
+                        source="hybrid",
+                    ),
+                ],
+                total_candidates=2,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="me de um protocolo para cardiomiopatia hipertrofica em cao",
+                workspace_id="default",
+                top_k=4,
+            ),
+            use_llm=False,
+        )
+
+        assert [item.chunk_id for item in response.results] == ["chunk-hcm"]
+        removed_by_id = {
+            item["chunk_id"]: item
+            for item in response.scores_breakdown["clinical_scope_filter"]["removed_chunks"]
+        }
+        assert removed_by_id["chunk-generic-semiology"]["reason"] == "missing_clinical_problem_signal"
+
+    def test_clinical_scope_filter_blocks_orthopedic_luxation_for_tbi_query(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            if len(calls) > 1:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[],
+                    total_candidates=0,
+                    low_confidence=True,
+                    retrieval_time_ms=1,
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-hip-luxation",
+                        document_id="doc-surgery",
+                        document_filename="Surgery.pdf",
+                        text=(
+                            "Animals with luxation of the femoral head typically present with hip pain, "
+                            "lameness and trauma-related orthopedic injuries. Diagnosis is based on "
+                            "palpation of the femoral head and radiographs of the hip joint."
+                        ),
+                        score=0.9,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-atlas-axis",
+                        document_id="doc-surgery",
+                        document_filename="Surgery.pdf",
+                        text=(
+                            "Fracture of the atlas or axis can occur after stabilization technique and "
+                            "may cause spinal cord injury, orthopedic pain and postoperative complications."
+                        ),
+                        score=0.86,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-tbi",
+                        document_id="doc-emergency",
+                        document_filename="Emergency.pdf",
+                        text=(
+                            "Traumatic brain injury and head trauma require neurologic assessment, "
+                            "monitoring of intracranial pressure, seizure control and treatment of "
+                            "cerebral edema in dogs and cats."
+                        ),
+                        score=0.82,
+                        source="hybrid",
+                    ),
+                ],
+                total_candidates=3,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="me de um protocolo para trauma cranio encefalico",
+                workspace_id="default",
+                top_k=4,
+            ),
+            use_llm=False,
+        )
+
+        assert [item.chunk_id for item in response.results] == ["chunk-tbi"]
+        removed_by_id = {
+            item["chunk_id"]: item
+            for item in response.scores_breakdown["clinical_scope_filter"]["removed_chunks"]
+        }
+        assert removed_by_id["chunk-hip-luxation"]["reason"] == "missing_clinical_problem_signal"
+        assert removed_by_id["chunk-atlas-axis"]["reason"] == "clinical_scope_mismatch"
+
+    def test_clinical_scope_filter_blocks_unknown_clinical_problem_instead_of_answering(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        def fake_search_hybrid(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-generic",
+                        document_id="doc-generic",
+                        text="exame fisico geral com avaliacao de mucosas, hidratacao, cabeca, torax e abdomen",
+                        score=0.9,
+                        source="hybrid",
+                    )
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(query="me de um protocolo para doenca sem regra", workspace_id="default", top_k=4),
+            use_llm=False,
+        )
+
+        assert response.results == []
+        assert response.low_confidence is True
+        removed = response.scores_breakdown["clinical_scope_filter"]["removed_chunks"]
+        assert removed[0]["reason"] == "clinical_plan_missing_problem"
+
+    def test_clinical_scope_filter_keeps_linear_foreign_body_surgical_candidates(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        calls = []
+
+        def fake_search_hybrid(request):
+            calls.append(request.query)
+            if len(calls) > 1:
+                return SearchResponse(
+                    query=request.query,
+                    workspace_id=request.workspace_id,
+                    results=[],
+                    total_candidates=0,
+                    low_confidence=True,
+                    retrieval_time_ms=1,
+                )
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-linear-foreign-body",
+                        document_id="doc-surgery",
+                        document_filename="Small Animal Surgery.pdf",
+                        text=(
+                            "Linear foreign bodies in cats can cause plication, intestinal obstruction, "
+                            "vomiting, abdominal pain and peritonitis. Surgical exploration may require "
+                            "enterotomy, gastrotomy and assessment for intestinal perforation."
+                        ),
+                        score=0.9,
+                        source="hybrid",
+                    ),
+                    SearchResultItem(
+                        chunk_id="chunk-urinary",
+                        document_id="doc-urology",
+                        text="feline urethral obstruction with hyperkalemia and urinary catheterization",
+                        score=0.89,
+                        source="hybrid",
+                    ),
+                ],
+                total_candidates=2,
+                low_confidence=False,
+                retrieval_time_ms=2,
+            )
+
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(
+            SearchRequest(
+                query="me de um protocolo de corpo estranho linear em gatos",
+                workspace_id="default",
+                top_k=4,
+            ),
+            use_llm=False,
+        )
+
+        assert [item.chunk_id for item in response.results] == ["chunk-linear-foreign-body"]
+        scope_filter = response.scores_breakdown["clinical_scope_filter"]
+        assert scope_filter["kept_count"] == 1
+        assert scope_filter["removed_count"] == 1
+        assert scope_filter["removed_chunks"][0]["reason"] == "clinical_scope_mismatch"
+
+    def test_clinical_evidence_pack_groups_retrieval_by_required_sections(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-sinais",
+                    document_id="doc-vet",
+                    text="vomito, diarreia e dor abdominal",
+                    score=0.91,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas"],
+                    primary_clinical_category="sinais_sintomas",
+                    query_variant={"variant_type": "original", "origin": "user_original"},
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-exames",
+                    document_id="doc-vet",
+                    text="hemograma, ureia, creatinina e ultrassom abdominal",
+                    score=0.89,
+                    source="hybrid",
+                    clinical_categories=["exames_complementares"],
+                    primary_clinical_category="exames_complementares",
+                    query_variant={"variant_type": "technical_pt", "origin": "planner_terms_pt"},
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    text="fluidoterapia, analgesia e antiemetico",
+                    score=0.87,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                    query_variant={"variant_type": "technical_en", "origin": "planner_terms_en"},
+                ),
+            ],
+            total_candidates=3,
+            low_confidence=False,
+            retrieval_time_ms=12,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "exames_complementares", "tratamento_clinico"],
+        )
+
+        assert pack.query == response.query
+        assert pack.source_method == "clinical_fanout"
+        assert pack.sections["sinais_sintomas"].status == "found"
+        assert pack.sections["sinais_sintomas"].items[0].chunk_id == "chunk-sinais"
+        assert pack.sections["exames_complementares"].items[0].query_variant["variant_type"] == "technical_pt"
+        assert pack.sections["tratamento_clinico"].items[0].relevance_reason
+
+    def test_clinical_evidence_pack_keeps_unclassified_rick_professor_hits(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="me de um protocolo de corpo estranho linear em gatos",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-rick-hit",
+                    document_id="doc-surgery",
+                    document_filename="Surgery.pdf",
+                    page_hint=2248,
+                    text=(
+                        "Linear foreign bodies in cats may anchor under the tongue, "
+                        "cause intestinal plication, obstruction and require surgical assessment."
+                    ),
+                    score=0.61,
+                    source="hybrid",
+                    clinical_categories=[],
+                    primary_clinical_category=None,
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=4,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(response)
+
+        assert pack.total_items == 1
+        assert pack.sections["resumo"].items[0].chunk_id == "chunk-rick-hit"
+        assert pack.bibliography[0].chunk_id == "chunk-rick-hit"
+
+    def test_clinical_evidence_pack_marks_missing_sections_without_inventing_content(self):
+        from models.schemas import SearchResponse
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[],
+            total_candidates=0,
+            low_confidence=True,
+            retrieval_time_ms=5,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "exames_complementares"],
+        )
+
+        assert pack.sections["sinais_sintomas"].status == "missing"
+        assert pack.sections["sinais_sintomas"].placeholder == "nao localizado nos trechos recuperados"
+        assert pack.sections["sinais_sintomas"].items == []
+        assert pack.section_order == ["sinais_sintomas", "exames_complementares"]
+        assert pack.missing_sections == ["sinais_sintomas", "exames_complementares"]
+
+    def test_clinical_evidence_pack_exposes_only_missing_required_sections(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Quais sinais e exames para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-sinais",
+                    document_id="doc-vet",
+                    text="vomito e dor abdominal em pancreatite canina",
+                    score=0.91,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas"],
+                    primary_clinical_category="sinais_sintomas",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "exames_complementares", "tratamento_clinico"],
+        )
+
+        assert pack.sections["sinais_sintomas"].status == "found"
+        assert pack.sections["exames_complementares"].status == "missing"
+        assert pack.sections["tratamento_clinico"].status == "missing"
+        assert pack.missing_sections == ["exames_complementares", "tratamento_clinico"]
+
+    def test_clinical_evidence_pack_normalizes_bibliographic_metadata_per_section(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Qual tratamento clinico para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2196,
+                    text="fluidoterapia, analgesia e antiemetico para pancreatite em cao",
+                    score=0.93,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                    query_variant={"variant_type": "technical_en", "origin": "planner_terms_en"},
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["tratamento_clinico"],
+        )
+
+        section = pack.sections["tratamento_clinico"]
+        item = section.items[0]
+        assert item.bibliographic_reference.chunk_id == "chunk-tratamento"
+        assert item.bibliographic_reference.document_id == "doc-ettinger"
+        assert item.bibliographic_reference.document_filename == "Ettinger.pdf"
+        assert item.bibliographic_reference.page == 2196
+        assert item.bibliographic_reference.sections == ["tratamento_clinico"]
+        assert section.bibliography == [item.bibliographic_reference]
+        assert pack.bibliography == [item.bibliographic_reference]
+
+    def test_clinical_evidence_pack_deduplicates_pack_bibliography_across_sections(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Quais sinais e exames para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-clinico",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2197,
+                    text="vomito, dor abdominal, hemograma e ultrassom abdominal",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas", "exames_complementares"],
+                    primary_clinical_category="sinais_sintomas",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "exames_complementares"],
+        )
+
+        assert len(pack.bibliography) == 1
+        assert pack.bibliography[0].chunk_id == "chunk-clinico"
+        assert pack.bibliography[0].sections == ["sinais_sintomas", "exames_complementares"]
+
+    def test_clinical_response_generator_renders_all_required_sections_from_evidence_pack(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import (
+            CLINICAL_RESPONSE_SECTION_TITLES,
+            generate_clinical_answer_from_evidence_pack,
+        )
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-sinais",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2196,
+                    text="vomito, dor abdominal e anorexia sao sinais descritos em pancreatite canina",
+                    score=0.92,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas"],
+                    primary_clinical_category="sinais_sintomas",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia, analgesia e antiemetico fazem parte do tratamento de suporte",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=2,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response)
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert "## direct_answer" in generated.answer_markdown
+        assert "## therapeutics" in generated.answer_markdown
+        assert generated.sections.sinais_sintomas
+        assert "vomito" in generated.sections.sinais_sintomas
+        assert "chunk-sinais" in generated.sections.sinais_sintomas
+        assert generated.sections.tratamento_clinico
+        assert "fluidoterapia" in generated.sections.tratamento_clinico
+        assert generated.missing_sections == pack.missing_sections
+        assert generated.generated_by == "deterministic_evidence_pack"
+
+    def test_clinical_response_generator_uses_rick_professor_answer_structure(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para corpo estranho linear em gatos?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-direct",
+                    document_id="doc-surgery",
+                    document_filename="Fossum.pdf",
+                    page_hint=512,
+                    text="Linear foreign body in cats can cause intestinal obstruction, vomiting and abdominal pain.",
+                    score=0.94,
+                    source="hybrid",
+                    clinical_categories=["resumo", "sinais_sintomas"],
+                    primary_clinical_category="resumo",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-surgery",
+                    document_id="doc-surgery",
+                    document_filename="Fossum.pdf",
+                    page_hint=516,
+                    text="Surgical treatment may require enterotomy or gastrotomy; peritonitis is a major complication.",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_cirurgico", "proximos_passos"],
+                    primary_clinical_category="tratamento_cirurgico",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-exams",
+                    document_id="doc-surgery",
+                    document_filename="Fossum.pdf",
+                    page_hint=514,
+                    text="Abdominal radiographs and ultrasound are diagnostic imaging options for intestinal obstruction.",
+                    score=0.88,
+                    source="hybrid",
+                    clinical_categories=["exames_complementares"],
+                    primary_clinical_category="exames_complementares",
+                ),
+            ],
+            total_candidates=3,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response)
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        headings = [
+            "## direct_answer",
+            "## therapeutics",
+            "## exams",
+            "## monitoring",
+            "## warnings",
+        ]
+        positions = [generated.answer_markdown.index(heading) for heading in headings]
+        assert positions == sorted(positions)
+        assert "## Referencias bibliograficas" in generated.answer_markdown
+
+    def test_clinical_evidence_pack_rejects_low_signal_terms_as_section_evidence(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para gastroenterite aguda em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-exames-fraco",
+                    document_id="doc-semiologia",
+                    document_filename="Semiologia.pdf",
+                    page_hint=205,
+                    text="diarreia e dor abdominal aparecem na anamnese",
+                    score=0.88,
+                    source="hybrid",
+                    clinical_categories=["exames_complementares"],
+                    primary_clinical_category="exames_complementares",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-tratamento-fraco",
+                    document_id="doc-semiologia",
+                    document_filename="Semiologia.pdf",
+                    page_hint=80,
+                    text="diarreia",
+                    score=0.86,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=2,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["exames_complementares", "tratamento_clinico"],
+        )
+
+        assert pack.sections["exames_complementares"].status == "missing"
+        assert pack.sections["tratamento_clinico"].status == "missing"
+        assert pack.bibliography == []
+        assert pack.missing_sections == ["exames_complementares", "tratamento_clinico"]
+
+    def test_clinical_evidence_pack_classifies_linear_foreign_body_sections(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+
+        response = SearchResponse(
+            query="linear foreign body in cats clinical protocol",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-linear-summary",
+                    document_id="doc-surgery",
+                    document_filename="SmallAnimalSurgery.pdf",
+                    page_hint=512,
+                    text="Linear foreign body in cats can cause intestinal obstruction, vomiting and abdominal pain.",
+                    score=0.94,
+                    source="hybrid",
+                    clinical_categories=["resumo", "sinais_sintomas"],
+                    primary_clinical_category="resumo",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-linear-surgery",
+                    document_id="doc-surgery",
+                    document_filename="SmallAnimalSurgery.pdf",
+                    page_hint=516,
+                    text="Surgical treatment may require enterotomy or gastrotomy; peritonitis is a major complication.",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_cirurgico", "proximos_passos"],
+                    primary_clinical_category="tratamento_cirurgico",
+                ),
+            ],
+            total_candidates=2,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["resumo", "sinais_sintomas", "tratamento_cirurgico", "proximos_passos"],
+        )
+
+        assert pack.sections["resumo"].status == "found"
+        assert pack.sections["sinais_sintomas"].status == "found"
+        assert pack.sections["tratamento_cirurgico"].status == "found"
+        assert pack.sections["proximos_passos"].status == "found"
+        assert pack.missing_sections == []
+
+    def test_clinical_response_generator_does_not_dump_raw_ocr_when_only_targeted_terms_are_useful(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para gastroenterite aguda em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-dieta",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=981,
+                    text=(
+                        "eBooks.Health.Elsevier.com CHAPTER 152 Nutritional Management of "
+                        "Gastrointestinal Disease. Commercial therapeutic GI diets are generally "
+                        "classified as highly digestible. Acute gastroenteritis may compromise "
+                        "digestion and absorption of nutrients; diets with high digestibility can "
+                        "be advantageous in these cases."
+                    ),
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["resumo", "tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["resumo", "tratamento_clinico"])
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert "eBooks.Health.Elsevier.com" not in generated.answer_markdown
+        assert "CHAPTER 152" not in generated.answer_markdown
+        assert "gastroenterite aguda" in generated.sections.resumo
+        assert "dieta altamente digestivel" in generated.sections.tratamento_clinico
+        assert generated.guardrails.bibliographic_grounding is True
+
+    def test_clinical_response_generator_uses_llm_with_required_chunk_citations(self, monkeypatch):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para trauma cranioencefalico?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tbi",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=860,
+                    text=(
+                        "Traumatic brain injury requires neurologic assessment, avoidance of "
+                        "secondary brain injury and monitoring of intracranial pressure."
+                    ),
+                    score=0.92,
+                    source="hybrid",
+                    clinical_categories=["resumo", "tratamento_clinico"],
+                    primary_clinical_category="resumo",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["resumo", "tratamento_clinico"])
+        llm_response = MagicMock()
+        llm_response.choices[0].message.content = (
+            "direct_answer\n"
+            "O trauma cranioencefalico exige avaliacao neurologica e controle de lesao secundaria [E1].\n\n"
+            "therapeutics\n"
+            "O manejo recuperado menciona monitoramento da pressao intracraniana [E1].\n\n"
+            "exams\n"
+            "A avaliacao neurologica orienta o acompanhamento inicial [E1].\n\n"
+            "monitoring\n"
+            "Monitorar pressao intracraniana quando indicado pelos trechos recuperados [E1].\n\n"
+            "warnings\n"
+            "Nao extrapolar condutas alem da evidencia fornecida [E1].\n\n"
+            "Evidencias\n"
+            "- [E1] Ettinger.pdf, p. 860."
+        )
+        monkeypatch.setattr("services.clinical_response_generator_service._has_usable_api_key", lambda: True)
+        create_mock = MagicMock(return_value=llm_response)
+        monkeypatch.setattr(
+            "services.clinical_response_generator_service.llm_client.chat.completions.create",
+            create_mock,
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack, use_llm=True)
+
+        assert generated.generated_by == "llm_evidence_pack"
+        assert "avaliacao neurologica" in generated.answer_markdown
+        assert "[E1]" in generated.answer_markdown
+        assert generated.guardrails.bibliographic_grounding is True
+        create_mock.assert_called_once()
+        assert create_mock.call_args.kwargs["temperature"] == 0.2
+        assert "response_format" not in create_mock.call_args.kwargs
+
+    def test_clinical_response_generator_falls_back_when_llm_uses_unknown_chunk(self, monkeypatch):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual tratamento para pancreatite?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["tratamento_clinico"])
+        llm_response = MagicMock()
+        llm_response.choices[0].message.content = (
+            "direct_answer\nUsar antibiotico sempre [E99].\n\n"
+            "therapeutics\nUsar antibiotico sempre [E99].\n\n"
+            "exams\nConteudo nao informado [E99].\n\n"
+            "monitoring\nConteudo nao informado [E99].\n\n"
+            "warnings\nConteudo nao informado [E99]."
+        )
+        monkeypatch.setattr("services.clinical_response_generator_service._has_usable_api_key", lambda: True)
+        monkeypatch.setattr(
+            "services.clinical_response_generator_service.llm_client.chat.completions.create",
+            MagicMock(return_value=llm_response),
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack, use_llm=True)
+
+        assert generated.generated_by == "deterministic_evidence_pack"
+        assert "[E99]" not in generated.answer_markdown
+        assert "fluidoterapia" in generated.answer_markdown
+
+    def test_clinical_response_reduction_preserves_cited_llm_synthesis(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import (
+            generate_clinical_answer_from_evidence_pack,
+            reduce_unsupported_clinical_answer,
+        )
+
+        response = SearchResponse(
+            query="Qual protocolo para trauma cranioencefalico?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tbi",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=860,
+                    text=(
+                        "Traumatic brain injury requires neurologic assessment and monitoring "
+                        "of intracranial pressure."
+                    ),
+                    score=0.92,
+                    source="hybrid",
+                    clinical_categories=["resumo"],
+                    primary_clinical_category="resumo",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["resumo"])
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+        llm_generated = generated.model_copy(update={
+            "generated_by": "llm_evidence_pack",
+            "answer_markdown": (
+                "## Resumo do problema\n"
+                "- O TCE exige avaliacao neurologica e monitoramento de pressao intracraniana [chunk-tbi]\n\n"
+                f"{generated.bibliography_footer}"
+            ),
+        })
+
+        reduced = reduce_unsupported_clinical_answer(llm_generated, pack)
+
+        assert reduced.generated_by == "llm_evidence_pack"
+        assert "O TCE exige avaliacao neurologica" in reduced.answer_markdown
+        assert reduced.guardrails.bibliographic_grounding is True
+        assert reduced.guardrails.unsupported_claims == []
+
+    def test_clinical_response_generator_summarizes_ocr_chunks_extractively(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para trauma cranioencefalico?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tbi-ocr",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=860,
+                    text=(
+                        "t of neurologic status is impera- permits assessment of any true neurologic deficit. "
+                        "TRAUMATIC BRAIN INJURY TBI Initial Evaluation. Intracranial pressure and "
+                        "secondary injuries edema hemorrhage should be considered."
+                    ),
+                    score=0.92,
+                    source="hybrid",
+                    clinical_categories=["resumo"],
+                    primary_clinical_category="resumo",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["resumo"])
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert "Evidencia recuperada:" in generated.sections.resumo
+        assert "traumatic brain injury" in generated.sections.resumo
+        assert "intracranial pressure" in generated.sections.resumo
+        assert "t of neurologic status is impera" not in generated.sections.resumo
+        assert generated.guardrails.bibliographic_grounding is True
+
+    def test_clinical_response_generator_keeps_missing_sections_blank_without_inventing_content(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Quais exames para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="tratamento de suporte inclui fluidoterapia e analgesia",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["exames_complementares", "tratamento_clinico"],
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert generated.sections.exames_complementares == ""
+        assert "hemograma" not in generated.sections.exames_complementares
+        assert "ultrassom" not in generated.sections.exames_complementares
+        assert generated.missing_sections == ["exames_complementares"]
+        assert "nao localizado nos trechos recuperados" not in generated.answer_markdown
+        assert "## Exames complementares" not in generated.answer_markdown
+        assert "## therapeutics" in generated.answer_markdown
+        assert "## exams" in generated.answer_markdown
+
+    def test_clinical_response_guardrail_flags_unsupported_claims_not_in_evidence_pack(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import (
+            generate_clinical_answer_from_evidence_pack,
+            verify_clinical_answer_grounding,
+        )
+
+        response = SearchResponse(
+            query="Qual tratamento clinico para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["tratamento_clinico"])
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+        mutated = generated.model_copy(update={
+            "answer_markdown": (
+                generated.answer_markdown
+                + "\n\n- Prednisona em dose imunossupressora deve ser usada em todos os casos."
+            )
+        })
+
+        guardrails = verify_clinical_answer_grounding(mutated, pack)
+
+        assert guardrails.bibliographic_grounding is False
+        assert guardrails.unsupported_claims == [
+            "Prednisona em dose imunossupressora deve ser usada em todos os casos."
+        ]
+
+    def test_clinical_response_guardrail_reduces_unsupported_answer_to_evidence_pack(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import (
+            generate_clinical_answer_from_evidence_pack,
+            reduce_unsupported_clinical_answer,
+        )
+
+        response = SearchResponse(
+            query="Qual tratamento clinico para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["tratamento_clinico"])
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+        mutated = generated.model_copy(update={
+            "answer_markdown": generated.answer_markdown + "\n\n- Antibiótico deve ser feito sempre."
+        })
+
+        reduced = reduce_unsupported_clinical_answer(mutated, pack)
+
+        assert "Antibiótico deve ser feito sempre" not in reduced.answer_markdown
+        assert reduced.guardrails.bibliographic_grounding is True
+        assert reduced.guardrails.unsupported_claims == []
+        assert "fluidoterapia" in reduced.answer_markdown
+
+    def test_clinical_response_marks_partial_when_critical_sections_are_missing(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-sinais",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2196,
+                    text="vomito e dor abdominal sao sinais descritos na pancreatite canina",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas"],
+                    primary_clinical_category="sinais_sintomas",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "exames_complementares", "tratamento_clinico"],
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert generated.completeness_status == "partial"
+        assert "orientacao parcial" in generated.completeness_note
+        assert "exames_complementares" in generated.completeness_note
+        assert "tratamento_clinico" in generated.completeness_note
+        assert "protocolo completo" not in generated.answer_markdown.lower()
+        assert "## Escopo da resposta" not in generated.answer_markdown
+        assert "orientacao parcial" not in generated.answer_markdown
+        assert generated.guardrails.unsupported_claims == []
+        assert generated.guardrails.bibliographic_grounding is True
+
+    def test_clinical_response_marks_complete_when_critical_sections_have_evidence(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-exames",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2197,
+                    text="hemograma e ultrassom abdominal podem apoiar a avaliacao diagnostica",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["exames_complementares"],
+                    primary_clinical_category="exames_complementares",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.89,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=2,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["exames_complementares", "tratamento_clinico"],
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert generated.completeness_status == "sufficient"
+        assert "evidencia recuperada cobre as secoes criticas" in generated.completeness_note
+        assert "orientacao parcial" not in generated.answer_markdown
+
+    def test_clinical_response_generator_appends_bibliography_footer_from_evidence_pack(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_bibliography_service import BIBLIOGRAPHY_FOOTER_HEADING
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual tratamento clinico para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-ettinger",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.9,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["tratamento_clinico"])
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert generated.bibliography_footer.startswith(BIBLIOGRAPHY_FOOTER_HEADING)
+        assert generated.answer_markdown.endswith(generated.bibliography_footer)
+        assert "Ettinger.pdf, p. 2198, chunk-tratamento - tratamento_clinico" in generated.bibliography_footer
+        assert generated.guardrails.unsupported_claims == []
+        assert generated.guardrails.bibliographic_grounding is True
+
+    def test_clinical_response_generator_footer_handles_empty_references(self):
+        from models.schemas import SearchResponse
+        from services.clinical_bibliography_service import BIBLIOGRAPHY_FOOTER_HEADING
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Qual protocolo para pancreatite em cao?",
+            workspace_id="default",
+            results=[],
+            total_candidates=0,
+            low_confidence=True,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(response, required_sections=["tratamento_clinico"])
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+
+        assert generated.bibliography_footer == (
+            f"{BIBLIOGRAPHY_FOOTER_HEADING}\n"
+            "Nenhuma referencia bibliografica recuperada."
+        )
+        assert generated.answer_markdown.endswith(generated.bibliography_footer)
+        assert generated.guardrails.unsupported_claims == []
+
+    def test_bibliography_footer_orders_references_by_first_appearance_in_answer(self):
+        from models.schemas import ClinicalBibliographyReference
+        from services.clinical_bibliography_service import format_bibliography_footer
+
+        references = [
+            ClinicalBibliographyReference(
+                chunk_id="chunk-tratamento",
+                document_filename="Ettinger.pdf",
+                page=2198,
+                sections=["tratamento_clinico"],
+            ),
+            ClinicalBibliographyReference(
+                chunk_id="chunk-sinais",
+                document_filename="Ettinger.pdf",
+                page=2196,
+                sections=["sinais_sintomas"],
+            ),
+        ]
+        answer_markdown = (
+            "## Sinais\n"
+            "- vomito e dor abdominal [Ettinger.pdf, p. 2196, chunk-sinais]\n\n"
+            "## Tratamento\n"
+            "- fluidoterapia [Ettinger.pdf, p. 2198, chunk-tratamento]"
+        )
+
+        footer = format_bibliography_footer(references, answer_markdown=answer_markdown)
+
+        assert footer.splitlines()[1].startswith("1. Ettinger.pdf, p. 2196, chunk-sinais")
+        assert footer.splitlines()[2].startswith("2. Ettinger.pdf, p. 2198, chunk-tratamento")
+
+    def test_bibliography_footer_deduplicates_references_and_merges_sections(self):
+        from models.schemas import ClinicalBibliographyReference
+        from services.clinical_bibliography_service import format_bibliography_footer
+
+        references = [
+            ClinicalBibliographyReference(
+                chunk_id="chunk-1",
+                document_filename="Ettinger.pdf",
+                page=2198,
+                sections=["tratamento_clinico"],
+            ),
+            ClinicalBibliographyReference(
+                chunk_id="chunk-1",
+                document_filename="Ettinger.pdf",
+                page=2198,
+                sections=["proximos_passos"],
+            ),
+        ]
+
+        footer = format_bibliography_footer(references)
+
+        assert footer.count("chunk-1") == 1
+        assert "tratamento_clinico, proximos_passos" in footer
+
+    def test_clinical_response_generator_footer_follows_answer_chunk_order(self):
+        from models.schemas import SearchResponse, SearchResultItem
+        from services.clinical_evidence_pack_service import build_clinical_evidence_pack
+        from services.clinical_response_generator_service import generate_clinical_answer_from_evidence_pack
+
+        response = SearchResponse(
+            query="Quais sinais e tratamento para pancreatite em cao?",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-tratamento",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2198,
+                    text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                    score=0.99,
+                    source="hybrid",
+                    clinical_categories=["tratamento_clinico"],
+                    primary_clinical_category="tratamento_clinico",
+                ),
+                SearchResultItem(
+                    chunk_id="chunk-sinais",
+                    document_id="doc-vet",
+                    document_filename="Ettinger.pdf",
+                    page_hint=2196,
+                    text="vomito e dor abdominal sao sinais descritos na pancreatite canina",
+                    score=0.8,
+                    source="hybrid",
+                    clinical_categories=["sinais_sintomas"],
+                    primary_clinical_category="sinais_sintomas",
+                ),
+            ],
+            total_candidates=2,
+            low_confidence=False,
+            retrieval_time_ms=7,
+            method="clinical_fanout",
+        )
+        pack = build_clinical_evidence_pack(
+            response,
+            required_sections=["sinais_sintomas", "tratamento_clinico"],
+        )
+
+        generated = generate_clinical_answer_from_evidence_pack(pack)
+        footer_lines = generated.bibliography_footer.splitlines()
+
+        assert footer_lines[1].startswith("1. Ettinger.pdf, p. 2196, chunk-sinais")
+        assert footer_lines[2].startswith("2. Ettinger.pdf, p. 2198, chunk-tratamento")
+
+    def test_search_and_answer_clinical_v2_returns_structured_payload_and_legacy_answer(self, monkeypatch):
+        from models.schemas import QueryRequest, SearchResponse, SearchResultItem
+        from services.search_service import search_and_answer
+
+        def fake_clinical_fanout_search(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-tratamento",
+                        document_id="doc-vet",
+                        document_filename="Ettinger.pdf",
+                        page_hint=2198,
+                        text="fluidoterapia e analgesia sao descritas como tratamento de suporte",
+                        score=0.93,
+                        source="hybrid",
+                        clinical_categories=["tratamento_clinico"],
+                        primary_clinical_category="tratamento_clinico",
+                    ),
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=8,
+                method="clinical_fanout",
+            )
+
+        monkeypatch.setattr("services.search_service.execute_clinical_fanout_search", fake_clinical_fanout_search)
+
+        response = search_and_answer(QueryRequest(
+            query="Qual tratamento clinico para pancreatite em cao?",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.0,
+            retrieval_profile="clinical_v2",
+        ))
+
+        assert response.answer == response.answer_markdown
+        assert response.bibliography_footer
+        assert response.answer_markdown.endswith(response.bibliography_footer)
+        assert response.sections.tratamento_clinico
+        assert response.bibliography[0].chunk_id == "chunk-tratamento"
+        assert response.citations[0].section == "tratamento_clinico"
+        assert response.citations[0].sections == ["tratamento_clinico"]
+        assert response.section_citation_map["tratamento_clinico"] == ["chunk-tratamento"]
+        assert response.section_grounding["tratamento_clinico"] is True
+        assert response.guardrails.bibliographic_grounding is True
+        assert response.retrieval_profile == "clinical_v2"
+        assert response.retrieval["clinical_generation"]["completeness_status"] in {"partial", "sufficient"}
+        assert response.retrieval["clinical_generation"]["guardrail_reasons"]
+
+    def test_clinical_v2_uses_rick_professor_retrieval_gate_and_selection(self, monkeypatch):
+        from models.schemas import SearchRequest, SearchResponse, SearchResultItem
+        from services.search_service import execute_clinical_fanout_search
+
+        seen_requests = []
+
+        def fake_prepare(query, use_llm=True):
+            return {
+                "original_query": query,
+                "retrieval_query": "cat linear foreign body enterotomy gastrotomy peritonitis",
+                "detected_language": "pt-BR",
+                "translated": True,
+                "generated_by": "llm_translation",
+                "blocked": False,
+                "blocked_reason": None,
+                "species": "gato",
+                "clinical_problem": "corpo estranho linear",
+                "intent": "protocolo",
+                "must_include_terms": ["linear foreign body", "cat"],
+                "retrieval_query_hash": "hash",
+            }
+
+        def item(index, *, filename, text, score=0.7):
+            return SearchResultItem(
+                chunk_id=f"chunk-{index}",
+                document_id=f"doc-{filename}",
+                document_filename=filename,
+                page_hint=index,
+                text=text,
+                score=score,
+                source="hybrid",
+            )
+
+        def fake_search_hybrid(request):
+            seen_requests.append(request)
+            results = [
+                item(1, filename="Fossum.pdf", score=0.61, text="Linear foreign body in cats causes intestinal obstruction and vomiting."),
+                item(2, filename="Tobias.pdf", score=0.6, text="Cats with linear foreign body may need enterotomy or gastrotomy."),
+                item(3, filename="Ettinger.pdf", score=0.59, text="Linear foreign body complications include peritonitis and monitoring."),
+                item(4, filename="Fossum.pdf", score=0.58, text="Linear foreign body diagnostic imaging includes abdominal radiographs."),
+                item(5, filename="Tobias.pdf", score=0.57, text="Linear foreign bodies in cats can anchor under the tongue."),
+                item(6, filename="Ettinger.pdf", score=0.56, text="Linear foreign body treatment requires stabilization before surgery."),
+                item(7, filename="Extra.pdf", score=0.55, text="Linear foreign body follow up monitors peritonitis."),
+            ]
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=results,
+                total_candidates=len(results),
+                low_confidence=False,
+                retrieval_time_ms=4,
+                method="hybrid",
+            )
+
+        monkeypatch.setattr("services.search_service.prepare_clinical_retrieval_query", fake_prepare)
+        monkeypatch.setattr("services.search_service.search_hybrid", fake_search_hybrid)
+
+        response = execute_clinical_fanout_search(SearchRequest(
+            query="protocolo de corpo estranho linear em gatos",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.0,
+            retrieval_profile="clinical_v2",
+        ))
+
+        assert seen_requests[0].top_k == 12
+        assert response.low_confidence is False
+        assert len(response.results) == 6
+        assert response.scores_breakdown["clinical_fanout"]["rick_professor_gate"]["approved"] is True
+        assert response.scores_breakdown["clinical_rick_professor_selection"]["selected_count"] == 6
+        per_source = {}
+        for result in response.results:
+            per_source[result.document_filename] = per_source.get(result.document_filename, 0) + 1
+        assert max(per_source.values()) <= 2
+
+    def test_search_and_answer_clinical_v2_logs_safe_translation_telemetry(self, monkeypatch):
+        from models.schemas import QueryRequest, SearchResponse, SearchResultItem
+        from services.search_service import search_and_answer
+
+        logged = []
+
+        def fake_clinical_fanout_search(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-linear",
+                        document_id="doc-vet",
+                        document_filename="Surgery.pdf",
+                        page_hint=516,
+                        text="Linear foreign body in cats may require enterotomy or gastrotomy.",
+                        score=0.93,
+                        source="hybrid",
+                        clinical_categories=["resumo", "tratamento_cirurgico"],
+                        primary_clinical_category="tratamento_cirurgico",
+                    ),
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=8,
+                method="clinical_fanout",
+                scores_breakdown={
+                    "clinical_fanout": {
+                        "detected_language": "pt-BR",
+                        "translation_applied": True,
+                        "translation_blocked": False,
+                        "translation_blocked_reason": None,
+                        "translated_query_hash": "abc123",
+                        "desired_sections": ["resumo", "tratamento_cirurgico", "referencias"],
+                    }
+                },
+            )
+
+        monkeypatch.setattr("services.search_service.execute_clinical_fanout_search", fake_clinical_fanout_search)
+        monkeypatch.setattr("services.search_service._log_query", logged.append)
+
+        response = search_and_answer(QueryRequest(
+            query="me de um protocolo de corpo estranho linear em gatos",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.0,
+            retrieval_profile="clinical_v2",
+        ))
+
+        assert response.retrieval_profile == "clinical_v2"
+        assert logged[0]["detected_language"] == "pt-BR"
+        assert logged[0]["translation_applied"] is True
+        assert logged[0]["translation_blocked"] is False
+        assert logged[0]["translation_blocked_reason"] is None
+        assert logged[0]["translated_query_hash"] == "abc123"
+        assert "translated_query" not in logged[0]
+        assert "retrieval_query" not in logged[0]
+
+    def test_search_and_answer_clinical_v2_uses_planned_sections_instead_of_irrelevant_surgical_section(self, monkeypatch):
+        from models.schemas import QueryRequest, SearchResponse, SearchResultItem
+        from services.search_service import search_and_answer
+
+        def fake_clinical_fanout_search(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[
+                    SearchResultItem(
+                        chunk_id="chunk-sinais",
+                        document_id="doc-vet",
+                        document_filename="Ettinger.pdf",
+                        page_hint=981,
+                        text="acute gastroenteritis with vomiting diarrhea and dehydration",
+                        score=0.91,
+                        source="hybrid",
+                        clinical_categories=["resumo", "sinais_sintomas"],
+                        primary_clinical_category="resumo",
+                    ),
+                ],
+                total_candidates=1,
+                low_confidence=False,
+                retrieval_time_ms=8,
+                method="clinical_fanout",
+                scores_breakdown={
+                    "clinical_fanout": {
+                        "desired_sections": [
+                            "resumo",
+                            "sinais_sintomas",
+                            "exames_complementares",
+                            "tratamento_clinico",
+                            "proximos_passos",
+                            "referencias",
+                        ],
+                    }
+                },
+            )
+
+        monkeypatch.setattr("services.search_service.execute_clinical_fanout_search", fake_clinical_fanout_search)
+
+        response = search_and_answer(QueryRequest(
+            query="Qual protocolo para gastroenterite aguda em cao?",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.0,
+            retrieval_profile="clinical_v2",
+        ))
+
+        assert "Tratamento cirurgico ou intervencional" not in response.answer_markdown
+        assert "tratamento_cirurgico" not in response.missing_sections
+        assert response.completeness_status == "partial"
+        assert response.confidence == "medium"
+
+    def test_search_and_answer_clinical_v2_no_evidence_is_not_grounded(self, monkeypatch):
+        from models.schemas import QueryRequest, SearchResponse
+        from services.search_service import search_and_answer
+
+        def fake_clinical_fanout_search(request):
+            return SearchResponse(
+                query=request.query,
+                workspace_id=request.workspace_id,
+                results=[],
+                total_candidates=0,
+                low_confidence=True,
+                retrieval_time_ms=5,
+                method="clinical_fanout",
+                scores_breakdown={
+                    "clinical_scope_filter": {
+                        "applied": True,
+                        "kept_count": 0,
+                        "removed_count": 1,
+                        "removed_chunks": [{"reason": "missing_clinical_problem_signal"}],
+                    }
+                },
+            )
+
+        monkeypatch.setattr("services.search_service.execute_clinical_fanout_search", fake_clinical_fanout_search)
+
+        response = search_and_answer(QueryRequest(
+            query="me de um protocolo para cardiomiopatia hipertrofica em cao",
+            workspace_id="default",
+            top_k=3,
+            threshold=0.25,
+            retrieval_profile="clinical_v2",
+        ))
+
+        assert response.grounded is False
+        assert response.low_confidence is True
+        assert response.confidence == "low"
+        assert response.citation_coverage == 0.0
+        assert response.bibliography == []
+        assert response.guardrails.bibliographic_grounding is False
+
+    def test_query_response_accepts_clinical_v2_contract_without_breaking_answer(self):
+        from models.schemas import (
+            ClinicalBibliographyReference,
+            ClinicalAnswerSections,
+            ClinicalResponseGuardrails,
+            QueryResponse,
+        )
+
+        response = QueryResponse(
+            answer="Resposta legada continua disponivel.",
+            chunks_used=["chunk-1"],
+            citations=[],
+            confidence="high",
+            grounded=True,
+            citation_coverage=1.0,
+            low_confidence=False,
+            retrieval={},
+            latency_ms=12,
+            sections=ClinicalAnswerSections(
+                resumo="Resumo do problema.",
+                tratamento_clinico="Conduta sustentada pela evidencia.",
+            ),
+            bibliography=[
+                ClinicalBibliographyReference(
+                    chunk_id="chunk-1",
+                    document_filename="Ettinger.pdf",
+                    page=2196,
+                    sections=["tratamento_clinico"],
+                )
+            ],
+            bibliography_footer=(
+                "## Referencias bibliograficas\n"
+                "1. Ettinger.pdf, p. 2196, chunk-1 - tratamento_clinico"
+            ),
+            missing_sections=["tratamento_cirurgico"],
+            guardrails=ClinicalResponseGuardrails(
+                scope_preserved=True,
+                translation_context_preserved=True,
+                unsupported_claims=[],
+                bibliographic_grounding=True,
+            ),
+        )
+
+        dumped = response.model_dump()
+        assert dumped["answer"] == "Resposta legada continua disponivel."
+        assert dumped["sections"]["resumo"] == "Resumo do problema."
+        assert dumped["bibliography"][0]["chunk_id"] == "chunk-1"
+        assert dumped["bibliography_footer"].startswith("## Referencias bibliograficas")
+        assert dumped["missing_sections"] == ["tratamento_cirurgico"]
+        assert dumped["guardrails"]["unsupported_claims"] == []
+        assert dumped["section_citation_map"] == {}
+        assert dumped["section_grounding"] == {}
+
+    def test_query_response_legacy_payload_defaults_clinical_v2_fields(self):
+        from models.schemas import QueryResponse
+
+        response = QueryResponse(
+            answer="Resposta atual.",
+            chunks_used=[],
+            citations=[],
+            confidence="medium",
+            grounded=False,
+            citation_coverage=0.0,
+            low_confidence=True,
+            retrieval={},
+            latency_ms=7,
+        )
+
+        assert response.answer == "Resposta atual."
+        assert response.sections is None
+        assert response.bibliography == []
+        assert response.bibliography_footer is None
+        assert response.missing_sections == []
+        assert response.guardrails is None
+
+    def test_query_response_json_schema_exposes_clinical_v2_fields(self):
+        from models.schemas import QueryResponse
+
+        schema = QueryResponse.model_json_schema()
+        properties = schema["properties"]
+
+        assert "answer" in properties
+        assert "sections" in properties
+        assert "bibliography" in properties
+        assert "bibliography_footer" in properties
+        assert "missing_sections" in properties
+        assert "guardrails" in properties
+        assert "section_citation_map" in properties
+        assert "section_grounding" in properties
+
+    def test_bibliography_footer_deduplicates_references_and_lists_sections(self):
+        from models.schemas import Citation
+        from services.clinical_bibliography_service import (
+            build_bibliography_references,
+            format_bibliography_footer,
+        )
+
+        citations = [
+            Citation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_filename="Ettinger.pdf",
+                page=2196,
+                text="Clinical evidence",
+                score=0.91,
+            ),
+            Citation(
+                chunk_id="chunk-1",
+                document_id="doc-1",
+                document_filename="Ettinger.pdf",
+                page=2196,
+                text="Duplicated evidence",
+                score=0.88,
+            ),
+            Citation(
+                chunk_id="chunk-2",
+                document_id="doc-1",
+                document_filename="Ettinger.pdf",
+                page=2199,
+                text="More evidence",
+                score=0.72,
+            ),
+        ]
+
+        references = build_bibliography_references(
+            citations,
+            {
+                "resumo": ["chunk-1"],
+                "tratamento_clinico": ["chunk-1", "chunk-2"],
+                "fora_do_contrato": ["chunk-2"],
+            },
+        )
+        footer = format_bibliography_footer(references)
+
+        assert len(references) == 2
+        assert references[0].sections == ["resumo", "tratamento_clinico"]
+        assert "## Referencias bibliograficas" in footer
+        assert "1. Ettinger.pdf, p. 2196, chunk-1 - resumo, tratamento_clinico" in footer
+        assert "fora_do_contrato" not in footer
+
+    def test_bibliography_footer_empty_reference_contract(self):
+        from services.clinical_bibliography_service import format_bibliography_footer
+
+        footer = format_bibliography_footer([])
+
+        assert footer == (
+            "## Referencias bibliograficas\n"
+            "Nenhuma referencia bibliografica recuperada."
+        )
+
+    def test_query_pipeline_contract_defaults_clinical_v2_fields_without_real_llm(self):
+        from models.schemas import QueryRequest, SearchResponse, SearchResultItem
+        from services.search_service import search_and_answer
+
+        mock_search_resp = SearchResponse(
+            query="pergunta",
+            workspace_id="default",
+            results=[
+                SearchResultItem(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_filename="Ettinger.pdf",
+                    text="Clinical evidence supports the answer.",
+                    score=0.92,
+                    page_hint=2196,
+                    source="dense",
+                    workspace_id="default",
+                )
+            ],
+            total_candidates=1,
+            low_confidence=False,
+            retrieval_time_ms=10,
+        )
+
+        with patch("services.search_service.search_hybrid", return_value=mock_search_resp):
+            with patch(
+                "services.search_service.generate_answer",
+                return_value=("Resposta sustentada.", ["chunk-1"], 1),
+            ):
+                response = search_and_answer(QueryRequest(query="pergunta", workspace_id="default"))
+
+        assert response.answer == "Resposta sustentada."
+        assert response.sections is None
+        assert response.bibliography == []
+        assert response.bibliography_footer is None
+        assert response.missing_sections == []
+        assert response.guardrails is None
 
     def test_document_registry_filters_non_canonical_raws(self, tmp_path, monkeypatch):
         """Registry/overview must only expose documents referenced by the operational dataset."""
@@ -1607,6 +4789,35 @@ class TestHealthEndpoint:
         assert data["telemetry"]["queries"]["count"] == 3
         assert data["telemetry"]["ingestion"]["errors"] == 1
         assert data["telemetry"]["evaluation"]["count"] == 1
+
+    def test_light_health_skips_inventory_counts_and_telemetry(self, monkeypatch):
+        from api.health_routes import health_check
+
+        class FakeClient:
+            def get_collections(self):
+                return {"collections": []}
+
+            def count(self, **kwargs):
+                raise AssertionError("light health must not run qdrant counts")
+
+        monkeypatch.setattr("api.health_routes.get_client", lambda: FakeClient())
+        monkeypatch.setattr(
+            "api.health_routes.get_workspace_inventory",
+            lambda workspace_id="default": (_ for _ in ()).throw(AssertionError("light health must not read inventory")),
+        )
+        monkeypatch.setattr(
+            "api.health_routes.get_telemetry",
+            lambda: (_ for _ in ()).throw(AssertionError("light health must not read telemetry")),
+        )
+
+        data = health_check(light=True)
+
+        assert data["status"] == "healthy"
+        assert data["mode"] == "light"
+        assert data["qdrant"]["status"] == "ok"
+        assert data["qdrant"]["points"] is None
+        assert data["corpus"] is None
+        assert data["telemetry"] is None
 
 
 # ── Metadata Endpoint ──────────────────────────────────────────────────────
@@ -3184,6 +6395,83 @@ class TestQueryPipeline:
         assert resp.chunks_used == ["chunk-medical-2"]
         assert "anticonvulsivante" in resp.answer.lower()
 
+    def test_crosslingual_bridge_expands_veterinary_surgery_terms(self):
+        """Portuguese surgery/fracture queries should carry English retrieval aliases."""
+        from services.search_service import _build_crosslingual_retrieval_query
+
+        expanded, method = _build_crosslingual_retrieval_query(
+            "como tratar fratura em gato com fixador esquelético externo"
+        )
+
+        assert method == "crosslingual_glossary"
+        assert expanded is not None
+        assert "fracture" in expanded
+        assert "cat" in expanded
+        assert "external skeletal fixation" in expanded
+        assert "external fixator" in expanded
+
+    def test_crosslingual_bridge_expands_gastroenteritis_protocol_terms(self):
+        """Portuguese gastroenteritis protocol queries should include treatment retrieval aliases."""
+        from services.search_service import _build_crosslingual_retrieval_query
+
+        expanded, method = _build_crosslingual_retrieval_query(
+            "me de um protocolo de gastroenterite em cão"
+        )
+
+        assert method == "crosslingual_glossary"
+        assert expanded is not None
+        assert "gastroenteritis" in expanded
+        assert "acute diarrhea" in expanded
+        assert "vomiting" in expanded
+        assert "dehydration" in expanded
+        assert "fluid therapy" in expanded
+
+    def test_crosslingual_bridge_expands_hepatopathy_protocol_terms(self):
+        """Portuguese hepatopathy protocol queries should include liver disease aliases."""
+        from services.search_service import _build_crosslingual_retrieval_query
+
+        expanded, method = _build_crosslingual_retrieval_query(
+            "me dê um protocolo para hepatopatia em cachorro"
+        )
+
+        assert method == "crosslingual_glossary"
+        assert expanded is not None
+        assert "hepatopathy" in expanded
+        assert "liver disease" in expanded
+        assert "chronic hepatitis in dogs" in expanded
+        assert "ursodeoxycholic acid" in expanded
+
+    def test_execute_search_applies_crosslingual_bridge_before_retrieval(self):
+        """Search endpoint path should benefit from the same multilingual bridge as chat."""
+        from services.search_service import execute_search
+        from models.schemas import SearchRequest, SearchResponse
+        from unittest.mock import patch
+
+        mock_search_resp = SearchResponse(
+            query="expanded",
+            workspace_id="default",
+            results=[],
+            total_candidates=0,
+            low_confidence=True,
+            retrieval_time_ms=10,
+        )
+
+        with patch("services.search_service.search_hybrid", return_value=mock_search_resp) as mock_search:
+            execute_search(
+                SearchRequest(
+                    query="cuidados pós-operatórios em cirurgia veterinária",
+                    workspace_id="default",
+                    top_k=5,
+                )
+            )
+
+        call_req = mock_search.call_args[0][0]
+        assert "postoperative care" in call_req.query
+        assert "perioperative care" in call_req.query
+        assert "wound healing" in call_req.query
+        assert "surgery" in call_req.query
+        assert "surgical" in call_req.query
+
     def test_query_pipeline_retries_with_stricter_grounded_prompt_when_protocol_answer_overreaches(self, monkeypatch):
         """A clinically relevant but weakly grounded protocol answer should get one stricter extractive retry."""
         from services.search_service import search_and_answer
@@ -3257,6 +6545,31 @@ class TestQueryPipeline:
         assert "diazepam ou midazolam" in resp.answer.lower()
         assert resp.grounded is True
         assert resp.citation_coverage == 1.0
+
+    def test_grounded_reanswer_rejects_generic_partial_answer(self):
+        from services.search_service import _should_accept_grounded_reanswer
+        from models.schemas import GroundingReport
+
+        original = GroundingReport(
+            grounded=False,
+            citation_coverage=0.5,
+            uncited_claims=["claim"],
+            needs_review=True,
+            reason="weak",
+        )
+        retry = GroundingReport(
+            grounded=True,
+            citation_coverage=1.0,
+            uncited_claims=[],
+            needs_review=False,
+            reason=None,
+        )
+
+        assert not _should_accept_grounded_reanswer(
+            original,
+            retry,
+            "Os trechos só sustentam uma orientação parcial.",
+        )
 
 
 class TestGroundingMultilingual:
@@ -4447,6 +7760,35 @@ class TestReranking:
         # All bm25f_scores should be 0, original order preserved (stable sort by (0.0, original))
         ids = [c["chunk_id"] for c in reranked]
         assert ids == ["c1", "c2"]  # stable — c1 had higher original score
+
+    def test_bm25f_reranker_ignores_species_only_overlap_for_clinical_query(self):
+        """Species aliases must not outrank chunks with the actual clinical concept."""
+        from services.vector_service import BM25FReranker
+
+        r = BM25FReranker()
+        candidates = [
+            {
+                "chunk_id": "orthopedic-dog-reference",
+                "text": "canine dog orthopedic references and surgical approach citations",
+                "score": 0.9,
+                "confidence_score": 0.6,
+                "document_id": "d1",
+            },
+            {
+                "chunk_id": "gastroenteritis-treatment",
+                "text": "acute gastroenteritis with diarrhea vomiting dehydration and fluid therapy",
+                "score": 0.4,
+                "confidence_score": 0.4,
+                "document_id": "d2",
+            },
+        ]
+
+        reranked = r.rerank(
+            "protocolo gastroenteritis dog canine diarrhea vomiting dehydration fluid therapy",
+            candidates,
+        )
+
+        assert reranked[0]["chunk_id"] == "gastroenteritis-treatment"
 
 
 class TestNeuralReranking:
@@ -8240,6 +11582,104 @@ def test_cookie_session_preferred_over_authorization_header_for_admin_routes():
 
     response = client.get("/admin/events", headers={"Authorization": operator_headers["Authorization"]})
     assert response.status_code == 200, response.text
+
+
+def test_external_chat_requires_x_api_key(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    monkeypatch.setenv("EXTERNAL_CHAT_API_KEY", "integration-secret")
+    client = TestClient(app)
+
+    response = client.post(
+        "/external/chat",
+        json={"question": "me de um protocolo de corpo estranho linear em gatos"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "invalid_api_key"
+
+
+def test_external_chat_returns_clinical_v2_chat_answer(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+    from models.schemas import (
+        Citation,
+        ClinicalBibliographyReference,
+        QueryResponse,
+    )
+
+    captured_requests = []
+
+    def fake_search_and_answer(request):
+        captured_requests.append(request)
+        return QueryResponse(
+            answer="resposta simples",
+            answer_markdown="direct_answer\nResposta do chat em portugues. [E1]",
+            chunks_used=["chunk-1"],
+            citations=[
+                Citation(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_filename="Surgery.pdf",
+                    page=2248,
+                    text="Linear foreign body in cats...",
+                    score=0.91,
+                    section="resumo",
+                    sections=["resumo"],
+                )
+            ],
+            confidence="high",
+            grounded=True,
+            citation_coverage=1.0,
+            low_confidence=False,
+            retrieval={"debug": "must_not_be_exposed"},
+            latency_ms=1234,
+            retrieval_profile="clinical_v2",
+            bibliography=[
+                ClinicalBibliographyReference(
+                    chunk_id="chunk-1",
+                    document_id="doc-1",
+                    document_filename="Surgery.pdf",
+                    page=2248,
+                    sections=["resumo"],
+                )
+            ],
+            completeness_status="sufficient",
+            missing_sections=[],
+        )
+
+    monkeypatch.setenv("EXTERNAL_CHAT_API_KEY", "integration-secret")
+    monkeypatch.setattr("services.search_service.search_and_answer", fake_search_and_answer)
+    client = TestClient(app)
+
+    response = client.post(
+        "/external/chat",
+        headers={"X-API-Key": "integration-secret"},
+        json={
+            "question": "me de um protocolo de corpo estranho linear em gatos",
+            "top_k": 8,
+            "threshold": 0.25,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["answer"] == "direct_answer\nResposta do chat em portugues. [E1]"
+    assert payload["confidence"] == "high"
+    assert payload["grounded"] is True
+    assert payload["low_confidence"] is False
+    assert payload["citation_coverage"] == 1.0
+    assert payload["retrieval_profile"] == "clinical_v2"
+    assert payload["citations"][0]["chunk_id"] == "chunk-1"
+    assert "retrieval" not in payload
+
+    assert captured_requests[0].query == "me de um protocolo de corpo estranho linear em gatos"
+    assert captured_requests[0].retrieval_profile == "clinical_v2"
+    assert captured_requests[0].top_k == 8
+    assert captured_requests[0].threshold == 0.25
 
 
 if __name__ == '__main__':

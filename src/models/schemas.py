@@ -11,7 +11,7 @@ EnterpriseRole = Literal["super_admin", "admin_rag", "auditor", "operator", "vie
 
 class DocumentUploadResponse(BaseModel):
     document_id: str
-    status: Literal["parsed", "failed", "partial"]
+    status: Literal["parsed", "failed", "partial", "queued", "processing"]
     catalog_scope: Literal["canonical", "operational"] = "canonical"
     source_type: str
     filename: str
@@ -20,6 +20,47 @@ class DocumentUploadResponse(BaseModel):
     chunk_count: int
     created_at: str
     chunking_strategy: str = "recursive"
+    ingestion_id: Optional[str] = None
+    message: Optional[str] = None
+
+
+class DocumentIngestionJobStatus(BaseModel):
+    ingestion_id: str
+    document_id: str
+    final_document_id: Optional[str] = None
+    workspace_id: str
+    filename: str
+    source_type: str
+    file_size_bytes: Optional[int] = None
+    large_job: bool = False
+    resource_profile: Optional[str] = None
+    resource_isolation_mode: Optional[str] = None
+    resource_limits: dict = Field(default_factory=dict)
+    status: Literal["pending", "processing", "committed", "failed", "aborted"]
+    page_count: Optional[int] = None
+    pages_processed: int = 0
+    chunks_written: int = 0
+    qdrant_points_written: int = 0
+    rss_peak_mb: Optional[float] = None
+    last_heartbeat_at: Optional[str] = None
+    last_batch_at: Optional[str] = None
+    pages_per_minute: Optional[float] = None
+    chunks_per_minute: Optional[float] = None
+    seconds_since_last_batch: Optional[int] = None
+    operational_status: Optional[Literal["pending", "running", "warning", "stalled", "failed", "completed"]] = None
+    operational_alerts: list[dict] = Field(default_factory=list)
+    created_at: str
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class DocumentIngestionJobListResponse(BaseModel):
+    items: list[DocumentIngestionJobStatus] = Field(default_factory=list)
+    total: int
+    limit: int
+    workspace_id: str
 
 
 class DocumentMetadata(BaseModel):
@@ -448,6 +489,7 @@ RetrievalProfile = Literal[
     "hyde_hybrid",
     "semantic_hybrid",
     "semantic_hyde_hybrid",
+    "clinical_v2",
 ]
 
 
@@ -455,7 +497,7 @@ class SearchRequest(BaseModel):
     query: str
     workspace_id: str = "default"
     top_k: int = 5
-    threshold: float = 0.70
+    threshold: float = 0.25
     retrieval_mode: str = "híbrida"
     filters: Optional[dict] = None
     include_raw_scores: bool = False
@@ -480,6 +522,11 @@ class SearchResultItem(BaseModel):
     workspace_id: Optional[str] = None
     source_type: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
+    query_variant: Optional[dict] = None
+    query_variants: list[dict] = Field(default_factory=list)
+    clinical_categories: list[str] = Field(default_factory=list)
+    primary_clinical_category: Optional[str] = None
+    clinical_category_matches: dict = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
@@ -509,7 +556,7 @@ class QueryRequest(BaseModel):
     query: str
     workspace_id: str = "default"
     top_k: int = 5
-    threshold: float = 0.70
+    threshold: float = 0.25
     stream: bool = False
     model: Optional[str] = None
     reranking: Optional[bool] = None  # None = use global config, True/False override
@@ -537,10 +584,107 @@ class Citation(BaseModel):
     page: Optional[int] = None
     text: str
     score: float
+    section: Optional[str] = None
+    sections: list[str] = Field(default_factory=list)
+
+
+ClinicalSectionKey = Literal[
+    "resumo",
+    "historico_resenha",
+    "sinais_sintomas",
+    "exames_complementares",
+    "tratamento_clinico",
+    "tratamento_cirurgico",
+    "proximos_passos",
+    "referencias",
+]
+
+
+class ClinicalAnswerSections(BaseModel):
+    resumo: Optional[str] = None
+    historico_resenha: Optional[str] = None
+    sinais_sintomas: Optional[str] = None
+    exames_complementares: Optional[str] = None
+    tratamento_clinico: Optional[str] = None
+    tratamento_cirurgico: Optional[str] = None
+    proximos_passos: Optional[str] = None
+    referencias: Optional[str] = None
+
+
+class ClinicalResponseGuardrails(BaseModel):
+    scope_preserved: bool
+    translation_context_preserved: bool
+    unsupported_claims: list[str] = Field(default_factory=list)
+    bibliographic_grounding: bool
+
+
+class ClinicalBibliographyReference(BaseModel):
+    chunk_id: str
+    document_id: Optional[str] = None
+    document_filename: Optional[str] = None
+    page: Optional[int] = None
+    sections: list[ClinicalSectionKey] = Field(default_factory=list)
+
+
+class ClinicalEvidenceItem(BaseModel):
+    chunk_id: str
+    text: str
+    score: float
+    section: ClinicalSectionKey
+    document_id: Optional[str] = None
+    document_filename: Optional[str] = None
+    page: Optional[int] = None
+    query_variant: Optional[dict] = None
+    query_variants: list[dict] = Field(default_factory=list)
+    clinical_categories: list[ClinicalSectionKey] = Field(default_factory=list)
+    bibliographic_reference: ClinicalBibliographyReference
+    relevance_reason: Optional[str] = None
+
+
+class ClinicalEvidenceSection(BaseModel):
+    section: ClinicalSectionKey
+    status: Literal["found", "missing"]
+    items: list[ClinicalEvidenceItem] = Field(default_factory=list)
+    bibliography: list[ClinicalBibliographyReference] = Field(default_factory=list)
+    placeholder: Optional[str] = None
+
+
+class ClinicalEvidencePack(BaseModel):
+    query: str
+    workspace_id: str = "default"
+    source_method: str
+    section_order: list[ClinicalSectionKey] = Field(default_factory=list)
+    sections: dict[str, ClinicalEvidenceSection] = Field(default_factory=dict)
+    bibliography: list[ClinicalBibliographyReference] = Field(default_factory=list)
+    missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    total_items: int = 0
+
+
+class ClinicalGeneratedAnswer(BaseModel):
+    answer_markdown: str
+    sections: ClinicalAnswerSections
+    missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    bibliography: list[ClinicalBibliographyReference] = Field(default_factory=list)
+    bibliography_footer: Optional[str] = None
+    evidence_chunk_ids: list[str] = Field(default_factory=list)
+    section_citation_map: dict[str, list[str]] = Field(default_factory=dict)
+    section_grounding: dict[str, bool] = Field(default_factory=dict)
+    completeness_status: Literal["sufficient", "partial"] = "sufficient"
+    completeness_note: str = "A evidencia recuperada cobre as secoes criticas disponiveis."
+    guardrails: ClinicalResponseGuardrails = Field(
+        default_factory=lambda: ClinicalResponseGuardrails(
+            scope_preserved=True,
+            translation_context_preserved=True,
+            unsupported_claims=[],
+            bibliographic_grounding=True,
+        )
+    )
+    generated_by: Literal["deterministic_evidence_pack", "llm_evidence_pack"] = "deterministic_evidence_pack"
 
 
 class QueryResponse(BaseModel):
     answer: str
+    answer_markdown: Optional[str] = None
     chunks_used: list[str]
     citations: list[Citation] = Field(default_factory=list)
     confidence: Literal["high", "medium", "low"]
@@ -557,6 +701,37 @@ class QueryResponse(BaseModel):
     query_expansion_mode: Optional[Literal["off", "always", "adaptive"]] = None
     query_expansion_decision_reason: Optional[str] = None
     retrieval_profile: Optional[RetrievalProfile] = None
+    sections: Optional[ClinicalAnswerSections] = None
+    bibliography: list[ClinicalBibliographyReference] = Field(default_factory=list)
+    bibliography_footer: Optional[str] = None
+    missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    guardrails: Optional[ClinicalResponseGuardrails] = None
+    completeness_status: Optional[Literal["sufficient", "partial"]] = None
+    completeness_note: Optional[str] = None
+    section_citation_map: dict[str, list[str]] = Field(default_factory=dict)
+    section_grounding: dict[str, bool] = Field(default_factory=dict)
+
+
+class ExternalChatRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=4000)
+    workspace_id: str = "default"
+    top_k: int = Field(default=8, ge=1, le=20)
+    threshold: float = Field(default=0.25, ge=0.0, le=1.0)
+
+
+class ExternalChatResponse(BaseModel):
+    answer: str
+    confidence: Literal["high", "medium", "low"]
+    grounded: bool
+    low_confidence: bool
+    citation_coverage: float
+    citations: list[Citation] = Field(default_factory=list)
+    bibliography: list[ClinicalBibliographyReference] = Field(default_factory=list)
+    chunks_used: list[str] = Field(default_factory=list)
+    retrieval_profile: RetrievalProfile = "clinical_v2"
+    latency_ms: int
+    completeness_status: Optional[Literal["sufficient", "partial"]] = None
+    missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
 
 
 # ─── Evaluation ──────────────────────────────────────────────
@@ -579,6 +754,87 @@ class Dataset(BaseModel):
     dataset_id: str
     version: str = "1.0"
     questions: list[EvaluationQuestion]
+
+
+class ClinicalEvaluationQuestion(BaseModel):
+    id: str
+    query: str
+    species: str
+    clinical_problem: str
+    organ_system: Optional[str] = None
+    intent: Literal["diagnostico", "protocolo", "tratamento", "exames", "resumo"] = "protocolo"
+    expected_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    required_evidence: list[str] = Field(default_factory=list)
+    required_terms_pt: list[str] = Field(default_factory=list)
+    required_terms_en: list[str] = Field(default_factory=list)
+    allowed_missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    workspace_id: str = "default"
+
+
+class ClinicalEvaluationDataset(BaseModel):
+    dataset_id: str
+    version: str = "1.0"
+    target_language: str = "pt-BR"
+    description: Optional[str] = None
+    questions: list[ClinicalEvaluationQuestion]
+
+
+class ClinicalQueryVariant(BaseModel):
+    variant_type: Literal["original", "technical_pt", "technical_en", "synonyms", "section_focus"]
+    query: str
+    purpose: Optional[str] = None
+    origin: Optional[
+        Literal[
+            "user_original",
+            "planner_terms_pt",
+            "planner_terms_en",
+            "planner_synonyms",
+            "planner_section_focus",
+            "llm",
+        ]
+    ] = None
+    context_preserved: bool = True
+    blocked: bool = False
+    blocked_reason: Optional[str] = None
+
+
+class ClinicalQueryPlan(BaseModel):
+    original_query: str
+    detected_language: str = "pt-BR"
+    species: Optional[str] = None
+    clinical_problem: Optional[str] = None
+    organ_system: Optional[str] = None
+    intent: Literal["diagnostico", "protocolo", "tratamento", "exames", "resumo", "unknown"] = "unknown"
+    canonical_terms_pt: list[str] = Field(default_factory=list)
+    canonical_terms_en: list[str] = Field(default_factory=list)
+    synonyms: list[str] = Field(default_factory=list)
+    required_terms: list[str] = Field(default_factory=list)
+    low_signal_terms: list[str] = Field(default_factory=list)
+    desired_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    query_variants: list[ClinicalQueryVariant] = Field(default_factory=list)
+    scope_warning: Optional[str] = None
+    planner_notes: Optional[str] = None
+    answers_user: bool = False
+    generated_by: Literal["llm", "deterministic_fallback"] = "deterministic_fallback"
+
+
+class ClinicalExpectedFixture(BaseModel):
+    question_id: str
+    required_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    allowed_missing_sections: list[ClinicalSectionKey] = Field(default_factory=list)
+    min_bibliography_references: int = 1
+    required_reference_fields: list[str] = Field(default_factory=list)
+    required_footer_heading: str = "## Referencias bibliograficas"
+    required_guardrails: list[str] = Field(default_factory=list)
+    forbidden_response_patterns: list[str] = Field(default_factory=list)
+
+
+class ClinicalExpectedFixtureSet(BaseModel):
+    fixture_id: str
+    version: str = "1.0"
+    dataset_id: str
+    fixtures: list[ClinicalExpectedFixture]
 
 
 class EvaluationResult(BaseModel):

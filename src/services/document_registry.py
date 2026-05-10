@@ -4,11 +4,34 @@ Filesystem-backed document registry helpers that do not depend on Qdrant.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
 from core.config import DOCUMENTS_DIR, EMBEDDING_MODEL
 from scripts.corpus_utils import canonical_document_ids
+
+
+def _clean_source_title(filename: str) -> str:
+    """Return a readable title from a source filename when no explicit title exists."""
+    stem = Path(filename or "unknown").stem
+    stem = re.sub(r"\s*\([^)]*(?:vetbooks|pdf|scan)[^)]*\)\s*", " ", stem, flags=re.IGNORECASE)
+    stem = stem.replace("_", " ")
+    stem = re.sub(r"\s+", " ", stem).strip(" -")
+    return stem or filename or "unknown"
+
+
+def _extract_publication_year(*values: object) -> Optional[int]:
+    """Extract a plausible publication year from metadata or filenames."""
+    for value in values:
+        if value is None:
+            continue
+        text = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+        for match in re.finditer(r"\b(19\d{2}|20\d{2})\b", text):
+            year = int(match.group(1))
+            if 1900 <= year <= 2100:
+                return year
+    return None
 
 
 def _classify_catalog_scope(document_id: str, raw_data: dict, canonical_ids: set[str]) -> str:
@@ -56,6 +79,19 @@ def _load_workspace_items(workspace_id: str = "default") -> list[dict]:
         pages = raw_data.get("pages", [])
         metadata = raw_data.get("metadata", {})
         tags = raw_data.get("tags") or metadata.get("tags") or []
+        filename = raw_data.get("filename", "unknown")
+        first_chunk_text = "\n".join(str(chunk.get("text", "")) for chunk in chunks[:5])
+        source_title = (
+            metadata.get("source_title")
+            or metadata.get("title")
+            or metadata.get("book_title")
+            or _clean_source_title(filename)
+        )
+        publication_year = (
+            metadata.get("publication_year")
+            or metadata.get("year")
+            or _extract_publication_year(metadata, filename, first_chunk_text)
+        )
         ingestion_status = metadata.get("ingestion_status")
         indexed_at = None
         if chunks and ingestion_status != "partial":
@@ -70,9 +106,17 @@ def _load_workspace_items(workspace_id: str = "default") -> list[dict]:
                 "workspace_id": raw_data.get("workspace_id", workspace_id),
                 "catalog_scope": _classify_catalog_scope(document_id, raw_data, canonical_ids),
                 "source_type": raw_data.get("source_type", "unknown"),
-                "filename": raw_data.get("filename", "unknown"),
+                "filename": filename,
+                "source_title": source_title,
+                "publication_year": publication_year,
+                "edition": metadata.get("edition"),
+                "authors": metadata.get("authors") or metadata.get("author"),
+                "publisher": metadata.get("publisher"),
+                "isbn": metadata.get("isbn"),
                 "page_count": metadata.get("page_count") or metadata.get("total_pages") or len(pages) or None,
-                "char_count": sum(len(page.get("text", "")) for page in pages),
+                "char_count": metadata.get("char_count")
+                if metadata.get("char_count") is not None
+                else sum(len(page.get("text", "")) for page in pages),
                 "chunk_count": len(chunks),
                 "status": ingestion_status or ("parsed" if chunks else "partial"),
                 "created_at": raw_data.get("created_at"),

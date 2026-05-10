@@ -11,7 +11,7 @@ import { useEnterpriseSession } from "@/components/layout/enterprise-session-pro
 import { Badge, Button, Card, EmptyState, ErrorState, Input, Select, Skeleton, Tabs, Textarea, useToast } from "@/components/ui";
 import type { QueryResponse, RetrievalProfile } from "@/types";
 
-const FORM_STORAGE_KEY = "frontend.chat.form";
+const FORM_STORAGE_KEY = "frontend.chat.form.v2";
 const HISTORY_STORAGE_KEY = "frontend.chat.history";
 
 type ChatFormState = {
@@ -33,14 +33,123 @@ const DEFAULT_FORM: ChatFormState = {
   query: "",
   workspaceId: "default",
   topK: 5,
-  threshold: 0.7,
-  retrievalProfile: "",
+  threshold: 0.25,
+  retrievalProfile: "clinical_v2",
 };
+
+function answerText(response: QueryResponse) {
+  return response.answer_markdown || response.answer;
+}
+
+function canViewRetrievalDebug(role?: string) {
+  return role === "super_admin" || role === "admin_rag" || role === "admin";
+}
+
+function sanitizeRetrievalDebug(retrieval: QueryResponse["retrieval"] | null | undefined) {
+  if (!retrieval) {
+    return {};
+  }
+  const raw = retrieval as Record<string, unknown>;
+  const scores = (raw.scores_breakdown ?? {}) as Record<string, unknown>;
+  const evidencePack = (raw.clinical_evidence_pack ?? {}) as Record<string, unknown>;
+  const sections = (evidencePack.sections ?? {}) as Record<string, Record<string, unknown>>;
+
+  return {
+    workspace_id: raw.workspace_id,
+    method: raw.method,
+    retrieval_profile: raw.retrieval_profile,
+    total_candidates: raw.total_candidates,
+    low_confidence: raw.low_confidence,
+    retrieval_low_confidence: raw.retrieval_low_confidence,
+    retrieval_time_ms: raw.retrieval_time_ms,
+    results_count: Array.isArray(raw.results) ? raw.results.length : 0,
+    clinical_fanout: scores.clinical_fanout,
+    clinical_scope_filter: summarizeScopeFilter(scores.clinical_scope_filter),
+    clinical_reranking: scores.clinical_reranking,
+    clinical_generation: raw.clinical_generation,
+    clinical_evidence_pack: {
+      source_method: evidencePack.source_method,
+      total_items: evidencePack.total_items,
+      missing_sections: evidencePack.missing_sections,
+      section_order: evidencePack.section_order,
+      bibliography_count: Array.isArray(evidencePack.bibliography) ? evidencePack.bibliography.length : 0,
+      sections: Object.fromEntries(
+        Object.entries(sections).map(([key, section]) => [
+          key,
+          {
+            status: section.status,
+            item_count: Array.isArray(section.items) ? section.items.length : 0,
+            bibliography_count: Array.isArray(section.bibliography) ? section.bibliography.length : 0,
+          },
+        ]),
+      ),
+    },
+  };
+}
+
+function AnswerMarkdown({ value }: { value: string }) {
+  const blocks = value
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  return (
+    <div className="clinical-answer professor-answer">
+      {blocks.map((block, index) => {
+        if (block.startsWith("## ")) {
+          const [heading, ...rest] = block.split("\n");
+          return (
+            <section key={`${heading}-${index}`} className="clinical-section">
+              <div className="clinical-section-title">
+                <strong>{heading.replace(/^##\s+/, "")}</strong>
+              </div>
+              {rest.length ? <AnswerMarkdown value={rest.join("\n")} /> : null}
+            </section>
+          );
+        }
+
+        const lines = block.split("\n").map((line) => line.trim()).filter(Boolean);
+        const isList = lines.length > 1 && lines.every((line) => /^(-|\d+\.)\s+/.test(line));
+        if (isList) {
+          return (
+            <ul key={`list-${index}`} className="answer-list">
+              {lines.map((line) => (
+                <li key={line}>{line.replace(/^(-|\d+\.)\s+/, "")}</li>
+              ))}
+            </ul>
+          );
+        }
+
+        return <p key={`paragraph-${index}`}>{block}</p>;
+      })}
+    </div>
+  );
+}
+
+function summarizeScopeFilter(value: unknown) {
+  const scope = (value ?? {}) as Record<string, unknown>;
+  const removedChunks = Array.isArray(scope.removed_chunks) ? scope.removed_chunks : [];
+  return {
+    applied: scope.applied,
+    kept_count: scope.kept_count,
+    removed_count: scope.removed_count,
+    removed_reasons: removedChunks.map((chunk) => {
+      const item = chunk as Record<string, unknown>;
+      return {
+        chunk_id: item.chunk_id,
+        reason: item.reason,
+        score: item.score,
+        primary_clinical_category: item.primary_clinical_category,
+      };
+    }),
+  };
+}
 
 export default function ChatPage() {
   const { pushToast } = useToast();
   const { session } = useEnterpriseSession();
   const activeWorkspaceId = session?.active_tenant.workspace_id ?? "default";
+  const allowRetrievalDebug = canViewRetrievalDebug(session?.user.role);
   const [form, setForm] = useState<ChatFormState>(DEFAULT_FORM);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -156,7 +265,7 @@ export default function ChatPage() {
                 min={0}
                 max={1}
                 value={form.threshold}
-                onChange={(event) => setForm((current) => ({ ...current, threshold: Number(event.target.value) || 0.7 }))}
+                onChange={(event) => setForm((current) => ({ ...current, threshold: Number(event.target.value) || 0.25 }))}
               />
             </label>
             <label className="ui-label">
@@ -166,6 +275,7 @@ export default function ChatPage() {
                 onChange={(event) => setForm((current) => ({ ...current, retrievalProfile: event.target.value as RetrievalProfile | "" }))}
               >
                 <option value="">Padrão do sistema</option>
+                <option value="clinical_v2">clinical_v2</option>
                 <option value="hybrid">hybrid</option>
                 <option value="hyde_hybrid">hyde_hybrid</option>
                 <option value="semantic_hybrid">semantic_hybrid</option>
@@ -214,15 +324,16 @@ export default function ChatPage() {
                 <Badge variant={result.grounded ? "success" : "warning"}>{result.grounded ? "grounded" : "sem grounding"}</Badge>
                 <Badge variant={result.low_confidence ? "danger" : "info"}>{result.low_confidence ? "baixa confiança" : "confiante"}</Badge>
                 {result.grounding?.needs_review ? <Badge variant="warning">needs review</Badge> : null}
+                {result.guardrails?.unsupported_claims?.length ? <Badge variant="danger">claims sem suporte</Badge> : null}
               </div>
             </div>
-            <p>{result.answer}</p>
+            <AnswerMarkdown value={answerText(result)} />
             <p className="thin">
               Citação: {formatPercent(result.citation_coverage, 0)} · Latência {formatMillis(result.latency_ms)}
             </p>
             {result.retrieval_profile ? <p className="thin">Retrieval profile: {result.retrieval_profile}</p> : null}
             <div className="page-actions">
-              <Button variant="secondary" onClick={() => void copyAnswer(result.answer)}>
+              <Button variant="secondary" onClick={() => void copyAnswer(answerText(result))}>
                 <Copy size={16} />
                 Copiar resposta
               </Button>
@@ -252,9 +363,32 @@ export default function ChatPage() {
                   ),
                 },
                 {
+                  value: "references",
+                  label: "Referências",
+                  content: (
+                    <div className="list">
+                      {result.bibliography?.length ? (
+                        result.bibliography.map((reference) => (
+                          <div key={`${reference.document_filename}-${reference.page}-${reference.chunk_id}`} className="list-item">
+                            <strong>{reference.document_filename ?? reference.document_id ?? "Documento sem nome"}</strong>
+                            <p className="thin">{reference.page != null ? `p. ${reference.page}` : "p. n/a"} · {reference.sections.join(", ") || "seção não informada"}</p>
+                            <p className="thin mono">{reference.chunk_id}</p>
+                          </div>
+                        ))
+                      ) : (
+                        <EmptyState title="Sem referências" description="A resposta não trouxe rodapé bibliográfico estruturado." />
+                      )}
+                    </div>
+                  ),
+                },
+                {
                   value: "retrieval",
                   label: "Retrieval",
-                  content: <pre className="mono">{JSON.stringify(result.retrieval, null, 2)}</pre>,
+                  content: allowRetrievalDebug ? (
+                    <pre className="mono">{JSON.stringify(sanitizeRetrievalDebug(result.retrieval), null, 2)}</pre>
+                  ) : (
+                    <EmptyState title="Debug restrito" description="Diagnóstico de retrieval disponível apenas para perfis administrativos." />
+                  ),
                 },
               ]}
             />
@@ -284,7 +418,7 @@ export default function ChatPage() {
                     {entry.result.low_confidence ? <Badge variant="danger">low confidence</Badge> : null}
                   </div>
                 </div>
-                <p>{truncate(entry.result.answer, 320)}</p>
+                <p>{truncate(answerText(entry.result), 320)}</p>
               </div>
             ))}
           </div>

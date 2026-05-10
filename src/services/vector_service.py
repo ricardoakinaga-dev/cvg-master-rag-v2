@@ -19,8 +19,6 @@ from qdrant_client.models import (
     SparseIndexParams, SparseVectorParams,
     NamedVector, Range
 )
-from qdrant_client.http.exceptions import UnexpectedResponse
-
 from core.config import (
     QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION,
     EMBEDDING_DIM, RRF_K, DEFAULT_TOP_K, QDRANT_CHECK_COMPATIBILITY,
@@ -65,14 +63,17 @@ MEANINGLESS_QUERY_TOKENS = {
 }
 LOW_SIGNAL_DOMAIN_TOKENS = {
     "animal", "animais", "paciente", "pacientes",
-    "gato", "gatos", "felino", "felinos",
-    "cao", "caes", "cão", "cães", "canino", "caninos",
+    "gato", "gatos", "felino", "felinos", "cat", "cats", "feline", "felines",
+    "cao", "caes", "cão", "cães", "cachorro", "cachorros", "cachorra", "cachorras",
+    "canino", "caninos", "dog", "dogs", "canine", "canines",
     "sintoma", "sintomas", "sinal", "sinais",
     "doenca", "doenças", "doença", "doencas",
+    "protocolo", "protocolos", "protocol", "protocols", "approach", "management",
 }
 
 
 _client: Optional[QdrantClient] = None
+_document_metadata_cache: dict[tuple[str, str], dict] = {}
 QDRANT_UPSERT_BATCH_SIZE = max(1, int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "128")))
 
 
@@ -199,19 +200,37 @@ def _qdrant_host_reachable(timeout: float = 0.25) -> bool:
         return False
 
 
+def create_qdrant_client(timeout: float | None = 1.0) -> QdrantClient:
+    """Create a Qdrant client compatible with both older and newer local clients."""
+    client_kwargs = {
+        "host": QDRANT_HOST,
+        "port": QDRANT_PORT,
+    }
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+
+    if QDRANT_CHECK_COMPATIBILITY:
+        try:
+            return QdrantClient(**client_kwargs, check_compatibility=True)
+        except TypeError as exc:
+            if "check_compatibility" not in str(exc):
+                raise
+
+    return QdrantClient(**client_kwargs)
+
+
 def get_client() -> QdrantClient:
     global _client
     if _client is None:
         if not _qdrant_host_reachable():
             raise RuntimeError(f"Qdrant host {QDRANT_HOST}:{QDRANT_PORT} not reachable")
-        client_kwargs = {
-            "host": QDRANT_HOST,
-            "port": QDRANT_PORT,
-            "check_compatibility": QDRANT_CHECK_COMPATIBILITY,
-            "timeout": 1.0,
-        }
-        _client = QdrantClient(**client_kwargs)
+        _client = create_qdrant_client(timeout=1.0)
     return _client
+
+
+def _collection_exists(client: QdrantClient) -> bool:
+    collections = client.get_collections()
+    return any(collection.name == QDRANT_COLLECTION for collection in collections.collections)
 
 
 def get_document_registry(workspace_id: str = "default") -> dict[str, dict]:
@@ -222,6 +241,42 @@ def get_document_registry(workspace_id: str = "default") -> dict[str, dict]:
 def get_document_metadata(document_id: str, workspace_id: str = "default") -> Optional[dict]:
     """Return metadata for a single document from the canonical registry."""
     return _registry_get_document_metadata(document_id, workspace_id)
+
+
+def _get_cached_document_metadata(document_id: str, workspace_id: str = "default") -> dict:
+    cache_key = (workspace_id, document_id)
+    if cache_key not in _document_metadata_cache:
+        _document_metadata_cache[cache_key] = get_document_metadata(document_id, workspace_id) or {}
+    return _document_metadata_cache[cache_key]
+
+
+def _build_citation_payload(chunk: Chunk, workspace_id: str) -> dict:
+    """Build source metadata stored with each Qdrant point for citations."""
+    doc_meta = _get_cached_document_metadata(chunk.document_id, workspace_id)
+    filename = doc_meta.get("filename")
+    source_title = doc_meta.get("source_title") or filename
+    page_hint = chunk.page_hint
+
+    payload = {
+        "document_filename": filename,
+        "source_title": source_title,
+        "source": source_title or filename,
+        "source_type": doc_meta.get("source_type"),
+        "catalog_scope": doc_meta.get("catalog_scope"),
+        "document_page_count": doc_meta.get("page_count"),
+        "publication_year": doc_meta.get("publication_year"),
+        "edition": doc_meta.get("edition"),
+        "authors": doc_meta.get("authors"),
+        "publisher": doc_meta.get("publisher"),
+        "isbn": doc_meta.get("isbn"),
+        "tags": doc_meta.get("tags") or [],
+    }
+
+    if page_hint is not None:
+        payload["page_start"] = page_hint
+        payload["page_end"] = page_hint
+
+    return {key: value for key, value in payload.items() if value not in (None, "", [])}
 
 
 def list_document_items(
@@ -256,14 +311,17 @@ def ensure_collection(vector_size: int = EMBEDDING_DIM, recreate: bool = False):
     client = get_client()
 
     if recreate:
-        try:
-            client.delete_collection(collection_name=QDRANT_COLLECTION)
-        except Exception:
-            pass
+        if _collection_exists(client):
+            try:
+                client.delete_collection(collection_name=QDRANT_COLLECTION)
+            except Exception:
+                pass
+            for _ in range(10):
+                if not _collection_exists(client):
+                    break
+                time.sleep(0.1)
 
-    try:
-        client.get_collection(collection_name=QDRANT_COLLECTION)
-    except (UnexpectedResponse, Exception):
+    if not _collection_exists(client):
         # Collection doesn't exist — create it
         client.create_collection(
             collection_name=QDRANT_COLLECTION,
@@ -286,7 +344,8 @@ def ensure_collection(vector_size: int = EMBEDDING_DIM, recreate: bool = False):
 def index_chunks(
     chunks: list[Chunk],
     embeddings: list[list[float]],
-    workspace_id: str = "default"
+    workspace_id: str = "default",
+    ingestion_id: str | None = None,
 ):
     """
     Index chunks with dense + sparse (BM25) vectors into Qdrant.
@@ -303,21 +362,26 @@ def index_chunks(
         # Use hash of chunk_id as point ID to avoid collision across documents
         # Qdrant requires unsigned integer; chunk_index alone causes overwrite when
         # multiple documents have chunks 0-N with same indices
+        payload = {
+            "chunk_id": chunk.chunk_id,
+            "document_id": chunk.document_id,
+            "workspace_id": chunk.workspace_id,
+            "text": chunk.text[:2000],  # truncate for payload
+            "page_hint": chunk.page_hint,
+            "chunk_index": chunk.chunk_index,
+            "strategy": chunk.strategy,
+            **_build_citation_payload(chunk, workspace_id),
+        }
+        if ingestion_id:
+            payload["ingestion_id"] = ingestion_id
+
         point = PointStruct(
             id=abs(hash(chunk.chunk_id)) % (2**63),
             vector={
                 "dense": embedding,
                 "sparse": sparse_vec
             },
-            payload={
-                "chunk_id": chunk.chunk_id,
-                "document_id": chunk.document_id,
-                "workspace_id": chunk.workspace_id,
-                "text": chunk.text[:2000],  # truncate for payload
-                "page_hint": chunk.page_hint,
-                "chunk_index": chunk.chunk_index,
-                "strategy": chunk.strategy
-            }
+            payload=payload,
         )
         points.append(point)
 
@@ -766,7 +830,7 @@ class BM25FReranker:
         if not candidates:
             return candidates
 
-        query_terms = self._tokenize(query)
+        query_terms = self._content_terms(query)
         if not query_terms:
             return candidates
 
@@ -865,6 +929,14 @@ class BM25FReranker:
     @staticmethod
     def _tokenize(text: str) -> list[str]:
         return _tokenize_terms(text, min_len=2)
+
+    @staticmethod
+    def _content_terms(text: str) -> list[str]:
+        terms = [
+            term for term in _tokenize_terms(text, min_len=2)
+            if term not in LOW_SIGNAL_DOMAIN_TOKENS and not term.isdigit()
+        ]
+        return terms or _tokenize_terms(text, min_len=2)
 
 
 def _normalize_sparse_score(score: float) -> float:
@@ -1024,6 +1096,29 @@ def delete_document_chunks(document_id: str):
                         key="document_id",
                         match=MatchValue(value=document_id)
                     )
+                ]
+            )
+        )
+    except Exception:
+        pass
+
+
+def delete_ingestion_points(ingestion_id: str, workspace_id: str = "default"):
+    """Delete all Qdrant points produced by a specific ingestion attempt."""
+    client = get_client()
+    try:
+        client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="ingestion_id",
+                        match=MatchValue(value=ingestion_id),
+                    ),
+                    FieldCondition(
+                        key="workspace_id",
+                        match=MatchValue(value=workspace_id),
+                    ),
                 ]
             )
         )
