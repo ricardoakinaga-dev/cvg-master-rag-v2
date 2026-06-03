@@ -75,6 +75,24 @@ LOW_SIGNAL_DOMAIN_TOKENS = {
 _client: Optional[QdrantClient] = None
 _document_metadata_cache: dict[tuple[str, str], dict] = {}
 QDRANT_UPSERT_BATCH_SIZE = max(1, int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "128")))
+QDRANT_COLLECTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_qdrant_collection_name(collection_name: str | None) -> str:
+    """Return a safe Qdrant collection name or raise ValueError."""
+    if not isinstance(collection_name, str):
+        collection_name = None
+    normalized = (collection_name or QDRANT_COLLECTION).strip()
+    if not QDRANT_COLLECTION_NAME_PATTERN.fullmatch(normalized):
+        raise ValueError("qdrant_collection must use 1-64 letters, numbers, '_' or '-'")
+    return normalized
+
+
+def list_qdrant_collections() -> list[str]:
+    """List existing Qdrant collection names."""
+    client = get_client()
+    collections = client.get_collections()
+    return sorted(collection.name for collection in collections.collections)
 
 
 def _sparse_hash(token: str) -> int:
@@ -228,9 +246,10 @@ def get_client() -> QdrantClient:
     return _client
 
 
-def _collection_exists(client: QdrantClient) -> bool:
+def _collection_exists(client: QdrantClient, collection_name: str | None = None) -> bool:
+    collection = validate_qdrant_collection_name(collection_name)
     collections = client.get_collections()
-    return any(collection.name == QDRANT_COLLECTION for collection in collections.collections)
+    return any(item.name == collection for item in collections.collections)
 
 
 def get_document_registry(workspace_id: str = "default") -> dict[str, dict]:
@@ -303,28 +322,33 @@ def get_corpus_overview(workspace_id: str = "default") -> dict:
     return _registry_get_corpus_overview(workspace_id)
 
 
-def ensure_collection(vector_size: int = EMBEDDING_DIM, recreate: bool = False):
+def ensure_collection(
+    vector_size: int = EMBEDDING_DIM,
+    recreate: bool = False,
+    collection_name: str | None = None,
+):
     """
     Create collection if it doesn't exist.
     Uses dense vector (1536 dim) + sparse BM25 vector.
     """
     client = get_client()
+    collection = validate_qdrant_collection_name(collection_name)
 
     if recreate:
-        if _collection_exists(client):
+        if _collection_exists(client, collection):
             try:
-                client.delete_collection(collection_name=QDRANT_COLLECTION)
+                client.delete_collection(collection_name=collection)
             except Exception:
                 pass
             for _ in range(10):
-                if not _collection_exists(client):
+                if not _collection_exists(client, collection):
                     break
                 time.sleep(0.1)
 
-    if not _collection_exists(client):
+    if not _collection_exists(client, collection):
         # Collection doesn't exist — create it
         client.create_collection(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             vectors_config={
                 "dense": VectorParams(
                     size=vector_size,
@@ -346,13 +370,15 @@ def index_chunks(
     embeddings: list[list[float]],
     workspace_id: str = "default",
     ingestion_id: str | None = None,
+    collection_name: str | None = None,
 ):
     """
     Index chunks with dense + sparse (BM25) vectors into Qdrant.
     Each chunk gets a dense vector (OpenAI) and a sparse BM25 vector.
     """
     client = get_client()
-    ensure_collection()
+    collection = validate_qdrant_collection_name(collection_name)
+    ensure_collection(collection_name=collection)
 
     points = []
     for chunk, embedding in zip(chunks, embeddings):
@@ -370,6 +396,7 @@ def index_chunks(
             "page_hint": chunk.page_hint,
             "chunk_index": chunk.chunk_index,
             "strategy": chunk.strategy,
+            "qdrant_collection": collection,
             **_build_citation_payload(chunk, workspace_id),
         }
         if ingestion_id:
@@ -389,7 +416,7 @@ def index_chunks(
     # sent in a single upsert. Split the write into smaller batches.
     for start in range(0, len(points), QDRANT_UPSERT_BATCH_SIZE):
         client.upsert(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             points=points[start:start + QDRANT_UPSERT_BATCH_SIZE]
         )
 
@@ -1084,12 +1111,13 @@ class NeuralReranker:
         return dot / (norm_a * norm_b)
 
 
-def delete_document_chunks(document_id: str):
+def delete_document_chunks(document_id: str, collection_name: str | None = None):
     """Delete all chunks for a document from Qdrant."""
     client = get_client()
+    collection = validate_qdrant_collection_name(collection_name)
     try:
         client.delete(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             points_selector=Filter(
                 must=[
                     FieldCondition(
@@ -1103,12 +1131,17 @@ def delete_document_chunks(document_id: str):
         pass
 
 
-def delete_ingestion_points(ingestion_id: str, workspace_id: str = "default"):
+def delete_ingestion_points(
+    ingestion_id: str,
+    workspace_id: str = "default",
+    collection_name: str | None = None,
+):
     """Delete all Qdrant points produced by a specific ingestion attempt."""
     client = get_client()
+    collection = validate_qdrant_collection_name(collection_name)
     try:
         client.delete(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             points_selector=Filter(
                 must=[
                     FieldCondition(
@@ -1126,12 +1159,13 @@ def delete_ingestion_points(ingestion_id: str, workspace_id: str = "default"):
         pass
 
 
-def delete_workspace_chunks(workspace_id: str):
+def delete_workspace_chunks(workspace_id: str, collection_name: str | None = None):
     """Delete all chunks for a workspace from Qdrant."""
     client = get_client()
+    collection = validate_qdrant_collection_name(collection_name)
     try:
         client.delete(
-            collection_name=QDRANT_COLLECTION,
+            collection_name=collection,
             points_selector=Filter(
                 must=[
                     FieldCondition(

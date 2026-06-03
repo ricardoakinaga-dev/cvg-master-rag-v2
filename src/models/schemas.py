@@ -20,6 +20,7 @@ class DocumentUploadResponse(BaseModel):
     chunk_count: int
     created_at: str
     chunking_strategy: str = "recursive"
+    qdrant_collection: Optional[str] = None
     ingestion_id: Optional[str] = None
     message: Optional[str] = None
 
@@ -31,6 +32,8 @@ class DocumentIngestionJobStatus(BaseModel):
     workspace_id: str
     filename: str
     source_type: str
+    chunking_strategy: Optional[str] = None
+    qdrant_collection: Optional[str] = None
     file_size_bytes: Optional[int] = None
     large_job: bool = False
     resource_profile: Optional[str] = None
@@ -77,6 +80,7 @@ class DocumentMetadata(BaseModel):
     chunking_strategy: str = "recursive"
     tags: list[str] = Field(default_factory=list)
     embeddings_model: Optional[str] = None
+    qdrant_collection: Optional[str] = None
     indexed_at: Optional[str] = None
 
 
@@ -90,6 +94,11 @@ class DocumentListResponse(BaseModel):
     limit: int
     offset: int
     workspace_id: str
+
+
+class QdrantCollectionListResponse(BaseModel):
+    active_collection: str
+    collections: list[str] = Field(default_factory=list)
 
 
 # ─── Enterprise Session ─────────────────────────────────────

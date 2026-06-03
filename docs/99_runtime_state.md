@@ -4,12 +4,12 @@
 
 ## CONTEXTO
 - project: cvg-master-rag
-- current_engine: REPO_SYNC
-- completion_status: PUSHED_TO_GITHUB_V2
+- current_engine: BUILD/RUNTIME_FIX
+- completion_status: SMALL_UPLOAD_INDEXING_VISIBLE
 
 ## POSIÇÃO ATUAL
-- current_phase: VETERINARY_CLINICAL_CHAT_RAG
-- current_task: Publicar estado consolidado do repositorio no GitHub `cvg-master-rag-v2`.
+- current_phase: DOCUMENT_INGESTION_RUNTIME
+- current_task: Garantir que uploads pequenos tambem aparecam na area `Indexacoes`.
 
 ## STATUS
 - status: READY_FOR_NEXT_STEP
@@ -17,18 +17,18 @@
 - score_target: 100/100
 
 ## PROGRESSO
-- last_completed_action: Remote `origin` atualizado para `https://github.com/ricardoakinaga-dev/cvg-master-rag-v2.git`; commit principal `2ee44ff` criado e enviado para `main` com consolidacao das atualizacoes clinicas/RAG e documentacao operacional.
-- next_action: Confirmar no GitHub se o repositorio `cvg-master-rag-v2` esta com branch `main` atualizada e seguir novo ciclo CVG conforme proxima demanda.
+- last_completed_action: Upload pequeno agora cria registro de indexacao visivel, passa por `processing` e fecha como `committed`/`failed`; frontend atualiza indexacoes apos qualquer upload e texto mudou para `indexacoes recentes`; testes/build/smoke publico verdes.
+- next_action: Seguir com decisao de produto sobre seletor de colecao para consulta em busca/chat ou preparar commit/push das mudancas atuais.
 
 ## BLOQUEIOS
-- blockers: nenhum bloqueio tecnico; push normal aceito sem force.
+- blockers: nenhum bloqueio tecnico identificado.
 
 ## DECISÃO HUMANA
 - human_decision_required: no
-- decision_description: Usuario solicitou git commit e push para o repositorio GitHub v2; executado sem force push e com varredura de segredos antes do commit.
+- decision_description: Usuario pediu visibilidade de indexacao tambem para arquivos pequenos, porque sem registro nao era possivel saber se o arquivo foi indexado corretamente.
 
 ## TIMESTAMP
-- last_update: 2026-05-10T19:48:12+00:00
+- last_update: 2026-05-11T00:12:32+00:00
 
 ---
 
@@ -138,6 +138,12 @@ O agente DEVE:
 | 2026-05-02 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | SPRINT_3.1_VCHAT_022 | Gerador professoral inicial renderiza todas as secoes obrigatorias usando somente evidence pack | READY_FOR_NEXT_STEP |
 | 2026-05-02 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | SPRINT_3.1_VCHAT_023 | Guardrail detecta unsupported claims e reduz resposta ao conteudo sustentado pelo evidence pack | READY_FOR_NEXT_STEP |
 | 2026-05-02 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | SPRINT_3.1_VCHAT_024 | Regra de completude marca orientacao parcial quando secoes criticas faltam e evita protocolo completo sem suporte | READY_FOR_NEXT_STEP |
+| 2026-05-10 | BUILD/RUNTIME_FIX | DOCUMENT_INGESTION_RUNTIME | QDRANT_COLLECTION_SELECTOR | Upload de documentos passa a selecionar/criar colecao Qdrant alvo com default `cvg_master_rag`, validacao backend/frontend, build e smoke publico | READY_FOR_NEXT_STEP |
+| 2026-05-10 | BUILD/RUNTIME_FIX | FRONTEND_VISUAL_FIX | SELECT_DROPDOWN_VISIBILITY | Itens de caixas de selecao corrigidos para texto escuro em fundo branco no dropdown nativo; lint/build/smoke publico verdes | READY_FOR_NEXT_STEP |
+| 2026-05-10 | BUILD/RUNTIME_FIX | DOCUMENT_INGESTION_RUNTIME | QDRANT_COLLECTION_FILTER_VISIBLE | Campo `Colecao Qdrant` exposto na grade principal de filtros da pagina `/documents` com atalho de default e smoke publico verde | READY_FOR_NEXT_STEP |
+| 2026-05-10 | BUILD/RUNTIME_FIX | DOCUMENT_INGESTION_RUNTIME | QDRANT_COLLECTION_INDEXING_CONFIRMATION | Colecao `cvg_institucional` confirmada com 6 pontos do upload `00-indice.pdf`; coluna `Colecao` adicionada na tabela e validada em producao | READY_FOR_NEXT_STEP |
+| 2026-05-11 | BUILD/RUNTIME_FIX | DOCUMENT_INGESTION_RUNTIME | DOCUMENTS_FILTER_UI_SIMPLIFICATION | Filtros de `/documents` simplificados: sem Workspace local, sem botao default, sem badge de validade, select de colecoes existentes com opcao `Nova colecao` | READY_FOR_NEXT_STEP |
+| 2026-05-11 | BUILD/RUNTIME_FIX | DOCUMENT_INGESTION_RUNTIME | SMALL_UPLOAD_INDEXING_VISIBILITY | Uploads pequenos passam a registrar indexacao visivel em `Indexacoes`, com status `processing/committed/failed`, pontos, chunks e colecao | READY_FOR_NEXT_STEP |
 | 2026-05-02 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | SPRINT_3.2_VCHAT_025 | Gerador cria `bibliography_footer` e faz `answer_markdown` terminar com referencias bibliograficas | READY_FOR_NEXT_STEP |
 | 2026-05-02 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | SPRINT_3.2_VCHAT_026 | Formatter deduplica referencias e ordena footer pela primeira aparicao dos chunks na resposta | READY_FOR_NEXT_STEP |
 | 2026-05-03 | BUILD | VETERINARY_CLINICAL_CHAT_RAG | VCHAT_027_042_RELEASE | Chat clinico v2 concluido com API/contrato/frontend/guardrails/telemetria/eval; `clinical_v2_eval_latest` passou 7/7 | COMPLETED |

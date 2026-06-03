@@ -839,6 +839,242 @@ COMPLETED
 
 ---
 
+## ENTRY: SMALL UPLOAD INDEXING VISIBILITY
+
+### TIMESTAMP
+2026-05-11 00:12
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+DOCUMENT_INGESTION_RUNTIME
+
+### SPRINT
+SMALL_UPLOAD_INDEXING_VISIBILITY
+
+### TASK
+Garantir que arquivos pequenos tambem aparecam na area `Indexacoes`, permitindo saber se foram indexados corretamente.
+
+### ACTION
+Criar registro de ingestao tambem para upload sincrono pequeno antes de `ingest_document`, marcar como `processing`, finalizar como `committed` com documento final, paginas, chunks, pontos e colecao, ou como `failed` em erro; retornar `ingestion_id` tambem para upload pequeno; atualizar frontend para recarregar indexacoes apos qualquer upload e trocar texto para `indexacoes recentes`.
+
+### RESULT
+- uploads pequenos deixam de ficar invisiveis na area `Indexacoes`
+- cada upload pequeno passa a aparecer com `committed`/`completed` quando indexado corretamente
+- em falha, a mesma area mostra `failed` e mensagem de erro
+- `py_compile`: verde
+- pytest focado: `3 passed, 10 deselected`
+- pytest ampliado upload/jobs: `13 passed, 322 deselected`
+- `npm run lint`: verde
+- `npm run build`: verde
+- `git diff --check`: verde
+- backend e frontend reiniciados via systemd
+- health publico healthy
+- smoke Playwright em producao confirmou texto `indexacoes recentes` e status `committed` visiveis, sem erros de console
+
+### DECISIONS
+- manter worker isolado apenas para PDF grande, mas registrar uploads pequenos no mesmo painel operacional
+- para arquivos pequenos, o estado `processing` pode ser breve porque a indexacao ocorre dentro da propria requisicao; o estado final fica persistido para auditoria
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: DOCUMENTS FILTER UI SIMPLIFICATION
+
+### TIMESTAMP
+2026-05-11 00:05
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+DOCUMENT_INGESTION_RUNTIME
+
+### SPRINT
+DOCUMENTS_FILTER_UI_SIMPLIFICATION
+
+### TASK
+Remover confusao visual na area de filtros da pagina `/documents` entre workspace, colecao Qdrant e controles redundantes.
+
+### ACTION
+Remover o campo local `Workspace` da tela de documentos e do modal de upload; substituir o input livre de `Colecao Qdrant` por select com colecoes existentes e opcao `Nova colecao`; exibir input de nome apenas quando `Nova colecao` for selecionada; remover botao `Usar cvg_master_rag`, badge `colecao valida` e badge de colecao no header.
+
+### RESULT
+- bloco de filtros passa a exibir: `Colecao Qdrant`, `Busca`, `Tipo`, `Status`, `Aplicar filtros`, `Limpar`, `Itens por pagina`
+- select de colecao lista `cvg_institucional`, `cvg_master_rag`, `rag_phase0` e `Nova colecao`
+- selecionar `Nova colecao` abre campo `Nome da nova colecao`
+- `npm run lint`: verde
+- `npm run build`: verde
+- `git diff --check`: verde
+- frontend reiniciado via systemd
+- smoke Playwright em producao confirmou ausencia de `Usar cvg_master_rag` e `colecao valida` no bloco, colecoes existentes visiveis no select e input de nova colecao abrindo corretamente
+
+### DECISIONS
+- manter `workspace_id` interno como contexto de tenant, sem expor como filtro redundante na tela de documentos
+- manter o seletor global `Tenant ativo` do shell fora do escopo desta limpeza
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: QDRANT COLLECTION INDEXING CONFIRMATION
+
+### TIMESTAMP
+2026-05-10 23:49
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+DOCUMENT_INGESTION_RUNTIME
+
+### SPRINT
+QDRANT_COLLECTION_INDEXING_CONFIRMATION
+
+### TASK
+Verificar se a nova colecao Qdrant foi criada/indexada apos upload real e melhorar a visibilidade dessa informacao na tela `/documents`.
+
+### ACTION
+Consultar Qdrant local, logs de ingestao, metadata do documento e API autenticada; adicionar coluna `Colecao` na tabela de documentos para exibir `qdrant_collection` sem depender do drawer de detalhe; rebuildar e reiniciar o frontend.
+
+### RESULT
+- colecoes Qdrant atuais: `cvg_institucional`, `cvg_master_rag`, `rag_phase0`
+- upload real `00-indice.pdf` confirmado com metadata `qdrant_collection=cvg_institucional`
+- Qdrant confirmou `6` pontos do documento `ada7f2aa-676f-4aa6-a94c-b91575e41ed9` em `cvg_institucional`
+- `cvg_master_rag` confirmou `0` pontos desse mesmo documento
+- API `/documents` retorna `00-indice.pdf` com `qdrant_collection=cvg_institucional`
+- tabela `/documents` agora mostra coluna `Colecao`
+- `npm run lint`: verde
+- `npm run build`: verde
+- `git diff --check`: verde
+- frontend reiniciado via systemd
+- smoke Playwright em producao confirmou `00-indice.pdf` e `cvg_institucional` visiveis, sem erros de console
+
+### DECISIONS
+- manter a listagem de documentos independente da colecao, mas exibir a colecao explicitamente por linha
+- consulta de chat/busca continua dependente de `QDRANT_COLLECTION` do backend ate existir seletor de colecao tambem para retrieval
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: QDRANT COLLECTION CONTROL VISIBLE IN DOCUMENT FILTERS
+
+### TIMESTAMP
+2026-05-10 20:26
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+DOCUMENT_INGESTION_RUNTIME
+
+### SPRINT
+QDRANT_COLLECTION_FILTER_VISIBLE
+
+### TASK
+Expor o controle de colecao Qdrant na area principal da pagina `/documents`, junto de Workspace, Busca, Tipo, Status, Aplicar filtros, Limpar e Itens por pagina.
+
+### ACTION
+Adicionar campo `Colecao Qdrant` na grade superior de filtros, reutilizando o mesmo estado persistido do modal de upload, adicionar atalho `Usar cvg_master_rag` na barra de acoes e ajustar o grid responsivo para cinco colunas no desktop.
+
+### RESULT
+- a colecao alvo fica visivel antes de abrir o modal de upload
+- o valor selecionado na grade principal e o mesmo usado no upload
+- `npm run lint`: verde
+- `npm run build`: verde
+- `git diff --check`: verde
+- frontend reiniciado via systemd
+- smoke Playwright no dominio publico confirmou `Colecao Qdrant = cvg_master_rag`, botao `Usar cvg_master_rag` e badge `colecao valida` visiveis na tela `/documents`, sem erros de console
+
+### DECISIONS
+- manter o campo tambem no modal para confirmacao no momento do envio
+- usar input com `datalist` para permitir escolher colecao existente ou digitar uma nova
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: SELECT DROPDOWN VISIBILITY FIX
+
+### TIMESTAMP
+2026-05-10 20:20
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+FRONTEND_VISUAL_FIX
+
+### SPRINT
+SELECT_DROPDOWN_VISIBILITY
+
+### TASK
+Corrigir caixas de selecao cujos itens apareciam branco sobre branco ao abrir/trocar opcoes.
+
+### ACTION
+Adicionar regra global em `frontend/app/globals.css` para `select option` e `select optgroup`, definindo fundo branco e texto escuro no dropdown nativo, sem alterar o estilo escuro do select fechado.
+
+### RESULT
+- dropdowns de login, tenant, filtros, admin, documentos e colecao Qdrant passam a exibir opcoes legiveis
+- `npm run lint`: verde
+- `npm run build`: verde
+- frontend reiniciado via systemd
+- smoke Playwright no dominio publico confirmou `optionColor=rgb(11, 16, 32)` e `optionBackground=rgb(255, 255, 255)`, sem erros de console
+
+### DECISIONS
+- manter select fechado no tema escuro atual
+- corrigir apenas o menu nativo de opcoes para maximizar compatibilidade entre navegadores
+
+### STATUS
+COMPLETED
+
+---
+
+## ENTRY: QDRANT COLLECTION SELECTOR FOR DOCUMENT UPLOAD
+
+### TIMESTAMP
+2026-05-10 20:14
+
+### ENGINE
+BUILD/RUNTIME_FIX
+
+### PHASE
+DOCUMENT_INGESTION_RUNTIME
+
+### SPRINT
+QDRANT_COLLECTION_SELECTOR
+
+### TASK
+Adicionar na pagina publica `/documents` um controle para selecionar a colecao Qdrant usada na indexacao de arquivos, mantendo `cvg_master_rag` como default.
+
+### ACTION
+Implementar contrato `qdrant_collection` no upload, jobs e metadata; validar nomes de colecao no backend; listar colecoes Qdrant existentes; direcionar `ensure_collection`, `upsert` e cleanup para a colecao selecionada; adicionar UI com input/datalist/select no modal de upload e indicador da colecao ativa; rebuildar e reiniciar backend/frontend em producao.
+
+### RESULT
+- default operacional preservado: `cvg_master_rag`
+- usuarios podem informar uma colecao nova ou escolher colecao existente antes do upload
+- resposta de upload, status de job e metadata de documentos passam a expor `qdrant_collection`
+- validacoes executadas: `py_compile`, pytest focado de upload/jobs, lint frontend, build frontend, `git diff --check`, scanner de secrets
+- runtime publico validado: `/api/health?light=true` healthy com colecao `cvg_master_rag`
+- smoke Playwright em producao validou login, abertura do modal de upload, campo `Colecao Qdrant` visivel em desktop/mobile e valor default `cvg_master_rag`, sem erros de console ou requests falhos
+
+### DECISIONS
+- nomes de colecao aceitam apenas letras, numeros, `_` e `-`, com ate 64 caracteres
+- colecao ausente e criada sob demanda por `ensure_collection`
+- cleanup de falhas usa a colecao registrada no job para evitar apagar pontos da colecao errada
+
+### STATUS
+COMPLETED
+
+---
+
 ## ENTRY: PUSH TO CVG MASTER RAG V2
 
 ### TIMESTAMP

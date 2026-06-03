@@ -37,6 +37,7 @@ import {
   TenantSwitchRequest,
   QueryLogResponse,
   QueryResponse,
+  QdrantCollectionListResponse,
   RepairResult,
   RetrievalProfile,
   SearchFilters,
@@ -368,10 +369,15 @@ export const api = {
       });
       return requestJson<DocumentIngestionJobListResponse>(`/documents/ingestion-jobs?${search.toString()}`);
     },
-    upload: async (file: File, workspaceId = "default") => {
+    listQdrantCollections: (workspaceId = "default") => {
+      const search = new URLSearchParams({ workspace_id: workspaceId });
+      return requestJson<QdrantCollectionListResponse>(`/documents/qdrant-collections?${search.toString()}`);
+    },
+    upload: async (file: File, workspaceId = "default", qdrantCollection?: string) => {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("workspace_id", workspaceId);
+      if (qdrantCollection) formData.append("qdrant_collection", qdrantCollection);
       return requestJson<DocumentUploadResponse>("/documents/upload", {
         method: "POST",
         body: formData,

@@ -43,6 +43,7 @@ export type DocumentMetadata = {
   chunking_strategy: string;
   tags: string[];
   embeddings_model: string | null;
+  qdrant_collection?: string | null;
   indexed_at: string | null;
 };
 
@@ -61,6 +62,7 @@ export type DocumentUploadResponse = {
   chunk_count: number;
   created_at: string;
   chunking_strategy?: string;
+  qdrant_collection?: string | null;
   ingestion_id?: string | null;
   message?: string | null;
 };
@@ -72,6 +74,8 @@ export type DocumentIngestionJobStatus = {
   workspace_id: string;
   filename: string;
   source_type: string;
+  chunking_strategy?: string | null;
+  qdrant_collection?: string | null;
   file_size_bytes?: number | null;
   large_job: boolean;
   resource_profile?: string | null;
@@ -106,6 +110,11 @@ export type DocumentIngestionJobListResponse = {
   total: number;
   limit: number;
   workspace_id: string;
+};
+
+export type QdrantCollectionListResponse = {
+  active_collection: string;
+  collections: string[];
 };
 
 export type SearchFilters = {

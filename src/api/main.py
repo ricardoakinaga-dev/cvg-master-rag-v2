@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models.schemas import (
     DocumentUploadResponse, DocumentMetadata, DocumentIngestionJobListResponse,
-    DocumentListResponse, QueryLogResponse,
+    DocumentListResponse, QdrantCollectionListResponse, QueryLogResponse,
     SearchRequest, SearchResponse,
     QueryRequest, QueryResponse,
     ExternalChatRequest, ExternalChatResponse,
@@ -1311,6 +1311,7 @@ async def upload_document(
     file: UploadFile = File(...),
     workspace_id: str = Form(default="default"),
     chunking_strategy: str = Form(default="recursive", description="Chunking strategy: 'recursive' or 'semantic'"),
+    qdrant_collection: str = Form(default="cvg_master_rag"),
     _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
 ):
     """
@@ -1318,7 +1319,19 @@ async def upload_document(
     chunking_strategy: 'recursive' (default, paragraph-aware) or 'semantic' (sentence-based with embedding coherence).
     """
     from services.ingestion_service import VALID_CHUNKING_STRATEGIES
+    from services.vector_service import validate_qdrant_collection_name
     _require_permission(_session, "documents.upload", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
+    try:
+        qdrant_collection = validate_qdrant_collection_name(qdrant_collection)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_qdrant_collection",
+                "message": str(e),
+                "received": qdrant_collection,
+            },
+        )
     if chunking_strategy not in VALID_CHUNKING_STRATEGIES:
         raise HTTPException(
             status_code=400,
@@ -1334,7 +1347,11 @@ async def upload_document(
     with traced_span(
         "documents.upload",
         kind=SpanKind.INTERNAL,
-        attributes={"filename": file.filename or "unknown", "chunking_strategy": chunking_strategy},
+        attributes={
+            "filename": file.filename or "unknown",
+            "chunking_strategy": chunking_strategy,
+            "qdrant_collection": qdrant_collection,
+        },
         workspace_id=workspace_id,
     ):
         # Check file extension
@@ -1444,6 +1461,7 @@ async def upload_document(
                     chunking_strategy=chunking_strategy,
                     file_size_bytes=received_bytes,
                     preflight=preflight,
+                    qdrant_collection=qdrant_collection,
                 )
                 try:
                     spawn_ingestion_worker(job["ingestion_id"])
@@ -1468,16 +1486,69 @@ async def upload_document(
                     chunk_count=0,
                     created_at=job["created_at"],
                     chunking_strategy=chunking_strategy,
+                    qdrant_collection=qdrant_collection,
                     ingestion_id=job["ingestion_id"],
                     message="Upload recebido; indexacao em processamento isolado.",
                 )
 
+            sync_job = create_ingestion_job(
+                source_path=file_path,
+                workspace_id=workspace_id,
+                filename=file.filename or file_path.name,
+                source_type=suffix.lstrip(".") or "unknown",
+                chunking_strategy=chunking_strategy,
+                file_size_bytes=received_bytes,
+                preflight={"large_job": False},
+                qdrant_collection=qdrant_collection,
+            )
+            update_ingestion_job(
+                sync_job["ingestion_id"],
+                status="processing",
+                started_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                last_heartbeat_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                operational_status="running",
+            )
             result = ingest_document(
                 file_path, workspace_id, file.filename,
                 chunking_strategy=chunking_strategy,
+                ingestion_id=sync_job["ingestion_id"],
+                qdrant_collection=qdrant_collection,
             )
-            return result
+            finished_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            update_ingestion_job(
+                sync_job["ingestion_id"],
+                status="committed",
+                document_id=result.document_id,
+                final_document_id=result.document_id,
+                page_count=result.page_count,
+                pages_processed=result.page_count or 0,
+                chunks_written=result.chunk_count,
+                qdrant_points_written=result.chunk_count,
+                finished_at=finished_at,
+                last_heartbeat_at=finished_at,
+                last_batch_at=finished_at,
+                operational_status="completed",
+                operational_alerts=[],
+                error_code=None,
+                error_message=None,
+            )
+            return DocumentUploadResponse(
+                **result.model_dump(exclude={"ingestion_id", "message"}),
+                ingestion_id=sync_job["ingestion_id"],
+                message=result.message,
+            )
         except IngestionError as e:
+            if "sync_job" in locals():
+                failed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                update_ingestion_job(
+                    sync_job["ingestion_id"],
+                    status="failed",
+                    finished_at=failed_at,
+                    last_heartbeat_at=failed_at,
+                    operational_status="failed",
+                    error_code="parse_failed",
+                    error_message=str(e),
+                )
             _log_ingestion_failure(
                 workspace_id=workspace_id,
                 filename=file.filename or "unknown",
@@ -1497,6 +1568,17 @@ async def upload_document(
                 detail={"error": e.error_code, "message": e.message, **e.details},
             )
         except Exception as e:
+            if "sync_job" in locals():
+                failed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                update_ingestion_job(
+                    sync_job["ingestion_id"],
+                    status="failed",
+                    finished_at=failed_at,
+                    last_heartbeat_at=failed_at,
+                    operational_status="failed",
+                    error_code=e.__class__.__name__,
+                    error_message=str(e),
+                )
             _log_ingestion_failure(
                 workspace_id=workspace_id,
                 filename=file.filename or "unknown",
@@ -1554,6 +1636,30 @@ def get_ingestion_job_status(
             detail={"error": "ingestion_job_not_found", "message": "Job de indexacao nao encontrado."},
         )
     return job
+
+
+@app.get("/documents/qdrant-collections", response_model=QdrantCollectionListResponse)
+def get_qdrant_collections(
+    workspace_id: str = Query(default="default"),
+    _session: EnterpriseSession = Depends(_enterprise_session_from_authorization),
+):
+    """List Qdrant collections available as upload targets."""
+    _require_permission(_session, "documents.read", workspace_id=workspace_id, target_type="workspace", target_id=workspace_id)
+    _require_workspace_access(workspace_id, _session)
+    from core.config import QDRANT_COLLECTION
+    from services.vector_service import list_qdrant_collections
+
+    try:
+        collections = list_qdrant_collections()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "qdrant_unavailable", "message": str(e)},
+        )
+    active = QDRANT_COLLECTION
+    if active not in collections:
+        collections = sorted([*collections, active])
+    return QdrantCollectionListResponse(active_collection=active, collections=collections)
 
 
 @app.get("/documents/{document_id}", response_model=DocumentMetadata)

@@ -19,7 +19,11 @@ from models.schemas import (
 from services.document_parser import parse_document, save_raw_json, ParseError, UnsupportedFormatError
 from services.chunker import recursive_chunk, semantic_chunk
 from services.embedding_service import get_embeddings_batch
-from services.vector_service import index_chunks, delete_document_chunks
+from services.vector_service import (
+    index_chunks,
+    delete_document_chunks,
+    validate_qdrant_collection_name,
+)
 from services.chunk_io import append_json_array_items, iter_json_array_batches
 from core.config import DOCUMENTS_DIR, CHUNKS_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_DIM
 from scripts.corpus_utils import canonical_document_ids
@@ -99,12 +103,16 @@ def _prune_previous_operational_uploads(workspace_id: str, filename: str, keep_d
             except Exception:
                 should_prune = False
         if should_prune:
-            candidates.append((document_id, raw_file, doc_dir / f"{document_id}_chunks.json", created_at))
+            qdrant_collection = (
+                payload.get("metadata", {}).get("qdrant_collection")
+                or payload.get("metadata", {}).get("collection")
+            )
+            candidates.append((document_id, raw_file, doc_dir / f"{document_id}_chunks.json", created_at, qdrant_collection))
 
     candidates.sort(key=lambda item: item[3], reverse=True)
-    for document_id, raw_file, chunks_file, _created_at in candidates:
+    for document_id, raw_file, chunks_file, _created_at, qdrant_collection in candidates:
         try:
-            delete_document_chunks(document_id)
+            delete_document_chunks(document_id, collection_name=qdrant_collection)
         except Exception:
             pass
         try:
@@ -296,6 +304,7 @@ def _embed_and_index_chunks_in_batches(
     chunks: list[Chunk],
     workspace_id: str,
     ingestion_id: str | None = None,
+    qdrant_collection: str | None = None,
 ) -> None:
     """Generate embeddings and index chunks in small batches to cap memory usage."""
     for start in range(0, len(chunks), INGESTION_INDEX_BATCH_SIZE):
@@ -306,7 +315,13 @@ def _embed_and_index_chunks_in_batches(
             raise IngestionError(
                 f"Mismatch: {len(chunk_batch)} chunks mas {len(embeddings)} embeddings"
             )
-        index_chunks(chunk_batch, embeddings, workspace_id, ingestion_id=ingestion_id)
+        index_chunks(
+            chunk_batch,
+            embeddings,
+            workspace_id,
+            ingestion_id=ingestion_id,
+            collection_name=qdrant_collection,
+        )
 
 
 def _coerce_embedding(embedding: object) -> list[float]:
@@ -347,6 +362,7 @@ def _reindex_persisted_chunks_file(
     document_id: str,
     workspace_id: str,
     chunks_path: Path,
+    qdrant_collection: str | None = None,
 ) -> tuple[int, str, bool]:
     """Restore/index a persisted chunks file in bounded batches."""
     temp_path = chunks_path.with_suffix(chunks_path.suffix + ".reindex_tmp")
@@ -376,7 +392,7 @@ def _reindex_persisted_chunks_file(
 
     qdrant_synced = True
     try:
-        delete_document_chunks(document_id)
+        delete_document_chunks(document_id, collection_name=qdrant_collection)
     except Exception:
         qdrant_synced = False
 
@@ -385,7 +401,7 @@ def _reindex_persisted_chunks_file(
             for chunk_batch in iter_json_array_batches(temp_path, INGESTION_INDEX_BATCH_SIZE):
                 chunk_objs = [Chunk(**chunk) for chunk in chunk_batch]
                 embeddings = [_coerce_embedding(chunk.get("embedding")) for chunk in chunk_batch]
-                index_chunks(chunk_objs, embeddings, workspace_id)
+                index_chunks(chunk_objs, embeddings, workspace_id, collection_name=qdrant_collection)
         except Exception:
             qdrant_synced = False
 
@@ -498,6 +514,7 @@ def _ingest_pdf_controlled(
     chunking_strategy: str,
     start_time: float,
     ingestion_id: str | None = None,
+    qdrant_collection: str | None = None,
 ) -> DocumentUploadResponse:
     """Ingest PDFs page-batch by page-batch to avoid loading the full book."""
     if chunking_strategy not in VALID_CHUNKING_STRATEGIES:
@@ -513,6 +530,7 @@ def _ingest_pdf_controlled(
     created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     filename = original_filename or file_path.name
     catalog_scope = "operational" if _is_operational_upload(file_path) else "canonical"
+    collection = validate_qdrant_collection_name(qdrant_collection)
     raw_json_path = str(doc_dir / f"{doc_id}_raw.json")
     chunks_file = doc_dir / f"{doc_id}_chunks.json"
     chunks_temp_file = chunks_file.with_suffix(chunks_file.suffix + ".tmp")
@@ -567,9 +585,18 @@ def _ingest_pdf_controlled(
             if indexing_enabled and batch_chunks:
                 try:
                     if ingestion_id:
-                        _embed_and_index_chunks_in_batches(batch_chunks, workspace_id, ingestion_id=ingestion_id)
+                        _embed_and_index_chunks_in_batches(
+                            batch_chunks,
+                            workspace_id,
+                            ingestion_id=ingestion_id,
+                            qdrant_collection=collection,
+                        )
                     else:
-                        _embed_and_index_chunks_in_batches(batch_chunks, workspace_id)
+                        _embed_and_index_chunks_in_batches(
+                            batch_chunks,
+                            workspace_id,
+                            qdrant_collection=collection,
+                        )
                     batch_points_indexed = len(batch_chunks)
                 except Exception as e:
                     response_status = "partial"
@@ -677,6 +704,7 @@ def _ingest_pdf_controlled(
             "raw_text_persisted": False,
             "source_path": str(file_path),
             "ingestion_id": ingestion_id,
+            "qdrant_collection": collection,
             "page_count": page_count,
             "char_count": total_chars,
             "chunk_count": chunk_count,
@@ -753,6 +781,7 @@ def _ingest_pdf_controlled(
         chunk_count=chunk_count,
         created_at=created_at,
         chunking_strategy=chunking_strategy,
+        qdrant_collection=collection,
     )
 
 
@@ -762,6 +791,7 @@ def ingest_document(
     original_filename: Optional[str] = None,
     chunking_strategy: str = "recursive",
     ingestion_id: str | None = None,
+    qdrant_collection: str | None = None,
 ) -> DocumentUploadResponse:
     """
     Full ingestion pipeline:
@@ -774,6 +804,7 @@ def ingest_document(
     Returns DocumentUploadResponse with document_id and metadata.
     """
     start_time = time_module.time()
+    collection = validate_qdrant_collection_name(qdrant_collection)
 
     # Validate workspace directory
     doc_dir = DOCUMENTS_DIR / workspace_id
@@ -787,6 +818,7 @@ def ingest_document(
             chunking_strategy=chunking_strategy,
             start_time=start_time,
             ingestion_id=ingestion_id,
+            qdrant_collection=collection,
         )
 
     # ── Step 1: Parse ─────────────────────────────────────────
@@ -802,6 +834,7 @@ def ingest_document(
     doc_id = metadata.document_id
     catalog_scope = "operational" if _is_operational_upload(file_path) else "canonical"
     normalized.metadata["catalog_scope"] = catalog_scope
+    normalized.metadata["qdrant_collection"] = collection
 
     # ── Step 2: Save raw JSON ───────────────────────────────────
     try:
@@ -827,7 +860,12 @@ def ingest_document(
 
     # ── Step 4/5: Generate embeddings and index in Qdrant ─────
     try:
-        _embed_and_index_chunks_in_batches(chunks, workspace_id, ingestion_id=ingestion_id)
+        _embed_and_index_chunks_in_batches(
+            chunks,
+            workspace_id,
+            ingestion_id=ingestion_id,
+            qdrant_collection=collection,
+        )
     except Exception as e:
         metadata.status = "partial"
         response_status = "partial"
@@ -898,6 +936,7 @@ def ingest_document(
         chunk_count=response_chunk_count,
         created_at=metadata.created_at,
         chunking_strategy=chunking_strategy,
+        qdrant_collection=collection,
     )
 
 
@@ -955,6 +994,9 @@ def reindex_document(
             data = json.load(f)
 
         normalized = NormalizedDocument(**data)
+        collection = validate_qdrant_collection_name(
+            normalized.metadata.get("qdrant_collection")
+        )
         if normalized.source_type == "pdf":
             chunks_path = doc_dir / f"{document_id}_chunks.json"
             if not chunks_path.exists():
@@ -965,6 +1007,7 @@ def reindex_document(
                 document_id=document_id,
                 workspace_id=workspace_id,
                 chunks_path=chunks_path,
+                qdrant_collection=collection,
             )
             _persist_raw_ingestion_status("parsed" if qdrant_synced else "partial")
             elapsed_ms = int((time_module.time() - start_time) * 1000)
@@ -972,7 +1015,7 @@ def reindex_document(
 
         qdrant_synced = True
         try:
-            delete_document_chunks(document_id)
+            delete_document_chunks(document_id, collection_name=collection)
         except Exception:
             qdrant_synced = False
 
@@ -980,7 +1023,11 @@ def reindex_document(
         chunk_objs = _chunk_document(normalized, workspace_id, chunking_strategy)
 
         try:
-            _embed_and_index_chunks_in_batches(chunk_objs, workspace_id)
+            _embed_and_index_chunks_in_batches(
+                chunk_objs,
+                workspace_id,
+                qdrant_collection=collection,
+            )
         except Exception:
             qdrant_synced = False
 

@@ -123,6 +123,7 @@ def _load_workspace_items(workspace_id: str = "default") -> list[dict]:
                 "chunking_strategy": chunks[0].get("strategy", "recursive") if chunks else "recursive",
                 "tags": tags if isinstance(tags, list) else [],
                 "embeddings_model": EMBEDDING_MODEL,
+                "qdrant_collection": metadata.get("qdrant_collection"),
                 "indexed_at": indexed_at,
             }
         )

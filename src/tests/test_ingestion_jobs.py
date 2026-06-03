@@ -83,6 +83,55 @@ def test_create_and_run_ingestion_job_commits_result(tmp_path, monkeypatch):
     assert stored["status"] == "committed"
 
 
+def test_ingestion_job_preserves_qdrant_collection(tmp_path, monkeypatch):
+    from services import ingestion_job_service as jobs
+
+    jobs_dir = tmp_path / "jobs"
+    upload_path = tmp_path / "documents" / "default" / "uploads" / "book.pdf"
+    upload_path.parent.mkdir(parents=True)
+    upload_path.write_bytes(b"%PDF heavy")
+
+    monkeypatch.setattr(jobs, "INGESTION_JOBS_DIR", jobs_dir)
+
+    job = jobs.create_ingestion_job(
+        source_path=upload_path,
+        workspace_id="default",
+        filename="book.pdf",
+        source_type="pdf",
+        chunking_strategy="recursive",
+        qdrant_collection="cvg_master_rag_alt",
+    )
+
+    def fake_ingest_document(
+        path: Path,
+        workspace_id: str,
+        filename: str,
+        *,
+        chunking_strategy: str,
+        qdrant_collection: str,
+    ):
+        assert qdrant_collection == "cvg_master_rag_alt"
+        return DocumentUploadResponse(
+            document_id="final-doc",
+            status="parsed",
+            catalog_scope="operational",
+            source_type="pdf",
+            filename=filename,
+            page_count=1,
+            char_count=100,
+            chunk_count=2,
+            created_at="2026-04-30T00:00:00Z",
+            chunking_strategy=chunking_strategy,
+            qdrant_collection=qdrant_collection,
+        )
+
+    committed = jobs.run_ingestion_job(job["ingestion_id"], ingest_func=fake_ingest_document)
+
+    assert job["qdrant_collection"] == "cvg_master_rag_alt"
+    assert committed["status"] == "committed"
+    assert committed["qdrant_collection"] == "cvg_master_rag_alt"
+
+
 def test_large_ingestion_preflight_rejects_insufficient_disk(tmp_path, monkeypatch):
     from services import ingestion_job_service as jobs
 
@@ -460,6 +509,7 @@ def test_upload_large_pdf_returns_queued_job_without_ingesting(tmp_path, monkeyp
             file=upload,
             workspace_id="default",
             chunking_strategy="recursive",
+            qdrant_collection="cvg_master_rag_alt",
             _session=_operator_session(),
         )
     )
@@ -469,9 +519,77 @@ def test_upload_large_pdf_returns_queued_job_without_ingesting(tmp_path, monkeyp
     assert response.document_id == response.ingestion_id
     assert response.char_count == 0
     assert response.chunk_count == 0
+    assert response.qdrant_collection == "cvg_master_rag_alt"
     assert spawned == [response.ingestion_id]
 
     job = jobs.get_ingestion_job(response.ingestion_id)
     assert job is not None
     assert job["status"] == "pending"
+    assert job["qdrant_collection"] == "cvg_master_rag_alt"
     assert Path(job["source_path"]).exists()
+
+
+def test_upload_small_file_records_visible_ingestion_job(tmp_path, monkeypatch):
+    import api.main as main
+    from services import ingestion_job_service as jobs
+
+    jobs_dir = tmp_path / "jobs"
+    documents_dir = tmp_path / "documents"
+    captured_kwargs: dict = {}
+
+    monkeypatch.setattr(main, "DOCUMENTS_DIR", documents_dir)
+    monkeypatch.setattr(main, "MAX_UPLOAD_BYTES", 1024 * 1024)
+    monkeypatch.setattr(main, "_require_permission", lambda *args, **kwargs: args[0])
+    monkeypatch.setattr(main, "_require_workspace_access", lambda workspace_id, session: session)
+    monkeypatch.setattr(jobs, "INGESTION_JOBS_DIR", jobs_dir)
+    monkeypatch.setattr(jobs, "ASYNC_PDF_UPLOAD_ENABLED", False)
+
+    def fake_ingest_document(path, workspace_id, filename, **kwargs):
+        captured_kwargs.update(kwargs)
+        return DocumentUploadResponse(
+            document_id="doc-small",
+            status="parsed",
+            catalog_scope="operational",
+            source_type="txt",
+            filename=filename,
+            page_count=1,
+            char_count=12,
+            chunk_count=2,
+            created_at="2026-05-11T00:00:00Z",
+            chunking_strategy=kwargs.get("chunking_strategy", "recursive"),
+            qdrant_collection=kwargs.get("qdrant_collection"),
+        )
+
+    monkeypatch.setattr("services.ingestion_service.ingest_document", fake_ingest_document)
+
+    upload = UploadFile(filename="small.txt", file=io.BytesIO(b"small upload"))
+    response = asyncio.run(
+        main.upload_document(
+            file=upload,
+            workspace_id="default",
+            chunking_strategy="recursive",
+            qdrant_collection="cvg_institucional",
+            _session=_operator_session(),
+        )
+    )
+
+    assert response.status == "parsed"
+    assert response.ingestion_id
+    assert response.document_id == "doc-small"
+    assert response.chunk_count == 2
+    assert response.qdrant_collection == "cvg_institucional"
+    assert captured_kwargs["ingestion_id"] == response.ingestion_id
+    assert captured_kwargs["qdrant_collection"] == "cvg_institucional"
+
+    job = jobs.get_ingestion_job(response.ingestion_id)
+    assert job is not None
+    assert job["status"] == "committed"
+    assert job["document_id"] == "doc-small"
+    assert job["final_document_id"] == "doc-small"
+    assert job["chunks_written"] == 2
+    assert job["qdrant_points_written"] == 2
+    assert job["qdrant_collection"] == "cvg_institucional"
+
+    listed = jobs.list_ingestion_jobs(workspace_id="default", limit=1)
+    assert listed[0]["ingestion_id"] == response.ingestion_id
+    assert listed[0]["operational_status"] == "completed"

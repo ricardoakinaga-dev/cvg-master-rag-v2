@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 from core.config import BASE_DIR, DATA_DIR, DOCUMENTS_DIR, LOGS_DIR
 from models.schemas import DocumentUploadResponse
-from services.vector_service import delete_ingestion_points
+from services.vector_service import delete_ingestion_points, validate_qdrant_collection_name
 
 
 TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -311,10 +311,12 @@ def create_ingestion_job(
     chunking_strategy: str,
     file_size_bytes: int | None = None,
     preflight: dict | None = None,
+    qdrant_collection: str | None = None,
 ) -> dict:
     ingestion_id = str(uuid.uuid4())
     now = _utc_now()
     preflight = preflight or {}
+    collection = validate_qdrant_collection_name(qdrant_collection)
     large_job = bool(preflight.get("large_job", is_large_ingestion(file_size_bytes or 0)))
     job = {
         "ingestion_id": ingestion_id,
@@ -325,6 +327,7 @@ def create_ingestion_job(
         "source_path": str(source_path),
         "source_type": source_type,
         "chunking_strategy": chunking_strategy,
+        "qdrant_collection": collection,
         "file_size_bytes": file_size_bytes,
         "large_job": large_job,
         "resource_profile": preflight.get("resource_profile", LARGE_INGESTION_RESOURCE_PROFILE if large_job else None),
@@ -425,11 +428,16 @@ def cleanup_ingestion_artifacts(
     workspace_id: str,
     source_path: Path | None = None,
     document_id: str | None = None,
+    qdrant_collection: str | None = None,
 ) -> None:
     """Remove temporary disk artifacts and Qdrant staging points for a failed job."""
     doc_dir = DOCUMENTS_DIR / workspace_id
     try:
-        delete_ingestion_points(ingestion_id, workspace_id=workspace_id)
+        delete_ingestion_points(
+            ingestion_id,
+            workspace_id=workspace_id,
+            collection_name=qdrant_collection,
+        )
     except Exception:
         pass
 
@@ -469,6 +477,17 @@ def _ingest_func_accepts_ingestion_id(ingest_func: Callable[..., DocumentUploadR
     return "ingestion_id" in signature.parameters
 
 
+def _ingest_func_accepts_qdrant_collection(ingest_func: Callable[..., DocumentUploadResponse]) -> bool:
+    try:
+        signature = inspect.signature(ingest_func)
+    except (TypeError, ValueError):
+        return True
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+    return "qdrant_collection" in signature.parameters
+
+
 def run_ingestion_job(
     ingestion_id: str,
     *,
@@ -498,6 +517,8 @@ def run_ingestion_job(
         kwargs = {"chunking_strategy": job.get("chunking_strategy") or "recursive"}
         if _ingest_func_accepts_ingestion_id(ingest_func):
             kwargs["ingestion_id"] = ingestion_id
+        if _ingest_func_accepts_qdrant_collection(ingest_func):
+            kwargs["qdrant_collection"] = job.get("qdrant_collection")
         result = ingest_func(source_path, job["workspace_id"], job["filename"], **kwargs)
         committed = update_ingestion_job(
             ingestion_id,
@@ -523,6 +544,7 @@ def run_ingestion_job(
             workspace_id=job["workspace_id"],
             source_path=source_path,
             document_id=job.get("document_id"),
+            qdrant_collection=job.get("qdrant_collection"),
         )
         failed = update_ingestion_job(
             ingestion_id,
@@ -540,6 +562,7 @@ def run_ingestion_job(
             workspace_id=job["workspace_id"],
             source_path=source_path,
             document_id=job.get("document_id"),
+            qdrant_collection=job.get("qdrant_collection"),
         )
         failed = update_ingestion_job(
             ingestion_id,

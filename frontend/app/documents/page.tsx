@@ -39,6 +39,10 @@ type UploadFeedback = {
 
 const ACTIVE_JOB_STATUSES = new Set<DocumentIngestionJobStatus["status"]>(["pending", "processing"]);
 const FILTERS_STORAGE_KEY = "frontend.documents.filters";
+const COLLECTION_STORAGE_KEY = "frontend.documents.qdrant_collection";
+const DEFAULT_QDRANT_COLLECTION = "cvg_master_rag";
+const COLLECTION_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const NEW_COLLECTION_VALUE = "__new_collection__";
 
 export default function DocumentsPage() {
   const { pushToast } = useToast();
@@ -64,6 +68,9 @@ export default function DocumentsPage() {
   const [ingestionJobs, setIngestionJobs] = useState<DocumentIngestionJobStatus[]>([]);
   const [jobsError, setJobsError] = useState<string | null>(null);
   const [jobsLastUpdatedAt, setJobsLastUpdatedAt] = useState<string | null>(null);
+  const [qdrantCollection, setQdrantCollection] = useState(DEFAULT_QDRANT_COLLECTION);
+  const [qdrantCollections, setQdrantCollections] = useState<string[]>([DEFAULT_QDRANT_COLLECTION]);
+  const [collectionsError, setCollectionsError] = useState<string | null>(null);
 
   useEffect(() => {
     const stored = loadStoredJson<Filters>(FILTERS_STORAGE_KEY, {
@@ -84,6 +91,36 @@ export default function DocumentsPage() {
   useEffect(() => {
     saveStoredJson(FILTERS_STORAGE_KEY, filters);
   }, [filters]);
+
+  useEffect(() => {
+    const stored = loadStoredJson<string>(COLLECTION_STORAGE_KEY, DEFAULT_QDRANT_COLLECTION);
+    setQdrantCollection(stored || DEFAULT_QDRANT_COLLECTION);
+  }, []);
+
+  useEffect(() => {
+    saveStoredJson(COLLECTION_STORAGE_KEY, qdrantCollection);
+  }, [qdrantCollection]);
+
+  useEffect(() => {
+    let active = true;
+    api.documents
+      .listQdrantCollections(activeWorkspaceId)
+      .then((response) => {
+        if (!active) return;
+        const next = Array.from(new Set([response.active_collection, DEFAULT_QDRANT_COLLECTION, ...response.collections])).sort();
+        setQdrantCollections(next);
+        setQdrantCollection((current) => current || response.active_collection || DEFAULT_QDRANT_COLLECTION);
+        setCollectionsError(null);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        const detail = err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Falha ao carregar coleções";
+        setCollectionsError(detail);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeWorkspaceId]);
 
   const refreshIngestionJobs = useCallback(async () => {
     try {
@@ -175,6 +212,16 @@ export default function DocumentsPage() {
       chunks: items.reduce((sum, item) => sum + item.chunk_count, 0),
     };
   }, [data]);
+  const collectionIsValid = COLLECTION_NAME_PATTERN.test(qdrantCollection.trim());
+  const collectionSelectValue = qdrantCollections.includes(qdrantCollection) ? qdrantCollection : NEW_COLLECTION_VALUE;
+
+  function handleCollectionChoice(value: string) {
+    if (value === NEW_COLLECTION_VALUE) {
+      setQdrantCollection("");
+      return;
+    }
+    setQdrantCollection(value);
+  }
 
   useEffect(() => {
     let active = true;
@@ -208,14 +255,22 @@ export default function DocumentsPage() {
     if (!file) return;
     setUploading(true);
     setUploadFeedback(null);
+    const targetCollection = qdrantCollection.trim();
+    if (!COLLECTION_NAME_PATTERN.test(targetCollection)) {
+      const description = "Use 1 a 64 caracteres: letras, números, _ ou -.";
+      setUploading(false);
+      setUploadFeedback({ intent: "error", title: "Coleção Qdrant inválida", description });
+      pushToast({ title: "Coleção Qdrant inválida", description, intent: "error" });
+      return;
+    }
     try {
       const workspaceId = activeWorkspaceId;
       const uploadedFileName = file.name;
-      const result = await api.documents.upload(file, workspaceId);
+      const result = await api.documents.upload(file, workspaceId, targetCollection);
       const queued = result.status === "queued";
       const description = queued
-        ? `${uploadedFileName} foi recebido e a indexação segue em worker isolado.`
-        : `${uploadedFileName} foi incorporado ao corpus de ${workspaceId}.`;
+        ? `${uploadedFileName} foi recebido e será indexado em ${targetCollection}.`
+        : `${uploadedFileName} foi incorporado ao corpus de ${workspaceId} em ${result.qdrant_collection ?? targetCollection}.`;
       setUploadFeedback({
         intent: "success",
         title: queued ? "Indexação em fila" : "Documento enviado",
@@ -228,9 +283,8 @@ export default function DocumentsPage() {
         description,
         intent: "success",
       });
-      if (queued) {
-        void refreshIngestionJobs();
-      }
+      void refreshIngestionJobs();
+      setQdrantCollections((current) => Array.from(new Set([...current, targetCollection])).sort());
       setPage(0);
       setAppliedFilters({ ...filters, workspace_id: workspaceId });
     } catch (err) {
@@ -349,15 +403,29 @@ export default function DocumentsPage() {
 
       <Card className="card-inner">
         <div className="form-grid">
-          <div className="grid cols-4">
+          <div className={collectionSelectValue === NEW_COLLECTION_VALUE ? "grid cols-5" : "grid cols-4"}>
             <label className="ui-label">
-              Workspace
-              <Input
-                value={filters.workspace_id}
-                readOnly
-                placeholder={activeWorkspaceId}
-              />
+              Coleção Qdrant
+              <Select
+                value={collectionSelectValue}
+                onChange={(event) => handleCollectionChoice(event.target.value)}
+              >
+                {qdrantCollections.map((collection) => (
+                  <option value={collection} key={collection}>{collection}</option>
+                ))}
+                <option value={NEW_COLLECTION_VALUE}>Nova coleção</option>
+              </Select>
             </label>
+            {collectionSelectValue === NEW_COLLECTION_VALUE ? (
+              <label className="ui-label">
+                Nome da nova coleção
+                <Input
+                  value={qdrantCollection}
+                  onChange={(event) => setQdrantCollection(event.target.value.trim())}
+                  placeholder="ex: gestacao_de_cadelas"
+                />
+              </label>
+            ) : null}
             <label className="ui-label">
               Busca
               <Input
@@ -434,7 +502,7 @@ export default function DocumentsPage() {
         <Card className="card-inner">
           <div className="card-title">
             <strong>Indexações</strong>
-            <span>{jobsError ?? `${formatNumber(ingestionJobs.length)} jobs recentes`}</span>
+            <span>{jobsError ?? `${formatNumber(ingestionJobs.length)} indexações recentes`}</span>
           </div>
           {jobsError ? (
             <div className="state-box">
@@ -470,6 +538,7 @@ export default function DocumentsPage() {
                       <span>{job.rss_peak_mb ? `${formatNumber(Math.round(job.rss_peak_mb))} MB RSS` : "RSS —"}</span>
                       <span>{job.file_size_bytes ? humanFileSize(job.file_size_bytes) : "tamanho —"}</span>
                       <span>{job.resource_isolation_mode ?? "isolamento —"}</span>
+                      <span>{job.qdrant_collection ?? DEFAULT_QDRANT_COLLECTION}</span>
                       <span>{formatRate(job.pages_per_minute, "min")} páginas</span>
                       <span>{formatRate(job.chunks_per_minute, "min")} chunks</span>
                       <span>{formatStaleness(job.seconds_since_last_batch)}</span>
@@ -499,6 +568,7 @@ export default function DocumentsPage() {
               <th>Documento</th>
               <th>Origem</th>
               <th>Escopo</th>
+              <th>Coleção</th>
               <th>Status</th>
               <th>Páginas</th>
               <th>Chunks</th>
@@ -509,7 +579,7 @@ export default function DocumentsPage() {
             {loading
               ? Array.from({ length: 4 }).map((_, index) => (
                   <tr key={index}>
-                    <td colSpan={7}>
+                    <td colSpan={8}>
                       <Skeleton className="skeleton" />
                     </td>
                   </tr>
@@ -525,6 +595,9 @@ export default function DocumentsPage() {
                       <Badge variant={item.catalog_scope === "canonical" ? "info" : "warning"}>
                         {item.catalog_scope}
                       </Badge>
+                    </td>
+                    <td>
+                      <span className="code-chip">{item.qdrant_collection ?? DEFAULT_QDRANT_COLLECTION}</span>
                     </td>
                     <td>
                       <Badge
@@ -601,6 +674,10 @@ export default function DocumentsPage() {
                   <p className="thin">{selectedDetail.embeddings_model ?? "—"}</p>
                 </div>
                 <div className="list-item">
+                  <strong>Coleção Qdrant</strong>
+                  <p className="thin mono">{selectedDetail.qdrant_collection ?? DEFAULT_QDRANT_COLLECTION}</p>
+                </div>
+                <div className="list-item">
                   <strong>Tags</strong>
                   <p className="thin">{selectedDetail.tags?.length ? selectedDetail.tags.join(", ") : "—"}</p>
                 </div>
@@ -625,15 +702,36 @@ export default function DocumentsPage() {
 
       <Modal open={showUpload} title="Upload de documento" onClose={() => setShowUpload(false)}>
         <form className="form-grid" onSubmit={handleUpload}>
-          <label className="ui-label">
-            Workspace
-            <Input
-              value={filters.workspace_id}
-              onChange={(event) => setFilters((current) => ({ ...current, workspace_id: event.target.value }))}
-              readOnly
-              placeholder={activeWorkspaceId}
-            />
-          </label>
+          <div className={collectionSelectValue === NEW_COLLECTION_VALUE ? "grid cols-2" : "grid"}>
+            <label className="ui-label">
+              Coleção Qdrant
+              <Select
+                value={collectionSelectValue}
+                onChange={(event) => handleCollectionChoice(event.target.value)}
+              >
+                {qdrantCollections.map((collection) => (
+                  <option value={collection} key={collection}>{collection}</option>
+                ))}
+                <option value={NEW_COLLECTION_VALUE}>Nova coleção</option>
+              </Select>
+            </label>
+            {collectionSelectValue === NEW_COLLECTION_VALUE ? (
+              <label className="ui-label">
+                Nome da nova coleção
+                <Input
+                  value={qdrantCollection}
+                  onChange={(event) => setQdrantCollection(event.target.value.trim())}
+                  placeholder="ex: gestacao_de_cadelas"
+                />
+              </label>
+            ) : null}
+          </div>
+          {collectionsError ? (
+            <div className="state-box">
+              <h3>Coleções indisponíveis</h3>
+              <p>{collectionsError}</p>
+            </div>
+          ) : null}
           <div
             className={dragging ? "state-box drag-active" : "state-box"}
             onDragOver={(event) => {
@@ -661,7 +759,7 @@ export default function DocumentsPage() {
             </div>
           ) : null}
           <div className="page-actions">
-            <Button type="submit" disabled={!file || uploading}>
+            <Button type="submit" disabled={!file || uploading || !collectionIsValid}>
               {uploading ? "Enviando..." : "Enviar"}
             </Button>
             <Button type="button" variant="ghost" onClick={() => setShowUpload(false)}>
